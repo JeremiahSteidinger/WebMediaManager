@@ -1,0 +1,222 @@
+@page "/libraries"
+@inject ILibraryService LibraryService
+@inject IMediaService MediaService
+@inject IJobQueue JobQueue
+@inject NavigationManager Nav
+
+<PageTitle>Libraries</PageTitle>
+
+<div class="flex items-center justify-between">
+    <h1 class="text-2xl font-bold text-white">Libraries</h1>
+    <div class="flex gap-2">
+        @if (libraries is { Count: > 0 })
+        {
+            <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                    @onclick="ScanAll">
+                Scan all
+            </button>
+        }
+        <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500"
+                @onclick="OpenAdd">
+            + Add library
+        </button>
+    </div>
+</div>
+
+@if (libraries is null)
+{
+    <p class="mt-6 text-slate-400">Loading…</p>
+}
+else if (libraries.Count == 0)
+{
+    <div class="mt-10 rounded-lg border border-dashed border-slate-700 p-10 text-center">
+        <p class="text-slate-400">No libraries yet.</p>
+        <button class="mt-4 rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500"
+                @onclick="OpenAdd">
+            Add your first library
+        </button>
+    </div>
+}
+else
+{
+    <div class="mt-6 overflow-hidden rounded-lg border border-slate-800">
+        <table class="w-full text-left text-sm">
+            <thead class="bg-slate-900/60 text-slate-400">
+                <tr>
+                    <th class="px-4 py-3 font-medium">Name</th>
+                    <th class="px-4 py-3 font-medium">Type</th>
+                    <th class="px-4 py-3 font-medium">Items</th>
+                    <th class="px-4 py-3 font-medium">Root path</th>
+                    <th class="px-4 py-3"></th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800">
+                @foreach (var lib in libraries)
+                {
+                    <tr class="hover:bg-slate-900/40">
+                        <td class="px-4 py-3 font-medium">
+                            <a class="text-white hover:text-sky-300" href="@($"library/{lib.Id}")">@lib.Name</a>
+                        </td>
+                        <td class="px-4 py-3 text-slate-300">@TypeLabel(lib.Type)</td>
+                        <td class="px-4 py-3 text-slate-300">@(counts.GetValueOrDefault(lib.Id))</td>
+                        <td class="px-4 py-3 font-mono text-xs text-slate-400">@lib.RootPath</td>
+                        <td class="px-4 py-3 text-right whitespace-nowrap">
+                            <button class="text-sky-400 hover:text-sky-300" @onclick="() => Scan(lib)">Scan</button>
+                            <button class="ml-3 text-sky-400 hover:text-sky-300" @onclick="() => OpenEdit(lib)">Edit</button>
+                            <button class="ml-3 text-red-400 hover:text-red-300" @onclick="() => OpenDelete(lib)">Delete</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+<Modal Visible="showEditor" Title="@(editing.Id == Guid.Empty ? "Add library" : "Edit library")" OnClose="CloseEditor">
+    <div class="space-y-4">
+        <div>
+            <label class="block text-sm font-medium text-slate-300">Name</label>
+            <input class="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white"
+                   @bind="editing.Name" />
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-slate-300">Type</label>
+            <select class="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white"
+                    @bind="editing.Type">
+                <option value="@LibraryType.Movies">Movies</option>
+                <option value="@LibraryType.TvShows">TV Shows</option>
+            </select>
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-slate-300">Root path</label>
+            <input class="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-xs text-white"
+                   @bind="editing.RootPath" placeholder="/media/movies" />
+            <p class="mt-1 text-xs text-slate-500">Path as seen by the app (e.g. the container mount point).</p>
+        </div>
+        @if (error is not null)
+        {
+            <p class="text-sm text-red-400">@error</p>
+        }
+    </div>
+    <div class="mt-6 flex justify-end gap-2">
+        <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                @onclick="CloseEditor">
+            Cancel
+        </button>
+        <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500"
+                @onclick="Save">
+            Save
+        </button>
+    </div>
+</Modal>
+
+<Modal Visible="deleteTarget is not null" Title="Delete library" OnClose="() => deleteTarget = null">
+    <p class="text-sm text-slate-300">
+        Delete <span class="font-semibold text-white">@deleteTarget?.Name</span>? This removes it from the
+        app's inventory. Files on disk are not touched.
+    </p>
+    <div class="mt-6 flex justify-end gap-2">
+        <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                @onclick="() => deleteTarget = null">
+            Cancel
+        </button>
+        <button class="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+                @onclick="ConfirmDelete">
+            Delete
+        </button>
+    </div>
+</Modal>
+
+@code {
+    private IReadOnlyList<Library>? libraries;
+    private IReadOnlyDictionary<Guid, int> counts = new Dictionary<Guid, int>();
+    private Library editing = new();
+    private bool showEditor;
+    private string? error;
+    private Library? deleteTarget;
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        libraries = await LibraryService.GetAllAsync();
+        counts = await MediaService.GetCountsByLibraryAsync();
+    }
+
+    private void Scan(Library lib)
+    {
+        JobQueue.EnqueueScan(lib.Id);
+        Nav.NavigateTo($"library/{lib.Id}");
+    }
+
+    private void ScanAll()
+    {
+        if (libraries is null)
+        {
+            return;
+        }
+        foreach (var lib in libraries)
+        {
+            JobQueue.EnqueueScan(lib.Id);
+        }
+    }
+
+    private static string TypeLabel(LibraryType type) => type == LibraryType.Movies ? "Movies" : "TV Shows";
+
+    private void OpenAdd()
+    {
+        editing = new Library { Type = LibraryType.Movies };
+        error = null;
+        showEditor = true;
+    }
+
+    private void OpenEdit(Library lib)
+    {
+        // Copy so cancel discards edits.
+        editing = new Library
+        {
+            Id = lib.Id,
+            Name = lib.Name,
+            Type = lib.Type,
+            RootPath = lib.RootPath,
+            CreatedUtc = lib.CreatedUtc,
+        };
+        error = null;
+        showEditor = true;
+    }
+
+    private void CloseEditor() => showEditor = false;
+
+    private async Task Save()
+    {
+        if (string.IsNullOrWhiteSpace(editing.Name) || string.IsNullOrWhiteSpace(editing.RootPath))
+        {
+            error = "Name and root path are required.";
+            return;
+        }
+
+        if (editing.Id == Guid.Empty)
+        {
+            await LibraryService.CreateAsync(editing);
+        }
+        else
+        {
+            await LibraryService.UpdateAsync(editing);
+        }
+
+        showEditor = false;
+        await Load();
+    }
+
+    private void OpenDelete(Library lib) => deleteTarget = lib;
+
+    private async Task ConfirmDelete()
+    {
+        if (deleteTarget is not null)
+        {
+            await LibraryService.DeleteAsync(deleteTarget.Id);
+            deleteTarget = null;
+            await Load();
+        }
+    }
+}

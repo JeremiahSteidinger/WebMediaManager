@@ -1,0 +1,135 @@
+@inject IRenameService RenameService
+
+<Modal Visible="Visible" Title="@($"Rename · {ItemTitle}")" OnClose="OnClose" MaxWidthClass="max-w-3xl">
+    <div class="space-y-4">
+        @if (busy && plan is null)
+        {
+            <p class="text-sm text-slate-400">Building preview…</p>
+        }
+        else if (error is not null)
+        {
+            <p class="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">@error</p>
+        }
+        else if (plan is null || plan.IsEmpty)
+        {
+            <p class="text-sm text-slate-400">No changes — the files already match your patterns.</p>
+        }
+        else
+        {
+            @if (plan.HasConflicts)
+            {
+                <p class="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                    Some targets conflict. Resolve them (adjust patterns or the conflicting files) before renaming.
+                </p>
+            }
+            <div class="max-h-96 overflow-auto rounded-lg border border-slate-800">
+                <table class="w-full text-xs">
+                    <tbody class="divide-y divide-slate-800">
+                        @foreach (var op in plan.Ops)
+                        {
+                            <tr class="@(op.HasConflict ? "bg-red-500/10" : null)">
+                                <td class="px-3 py-2 font-mono text-slate-400">@op.FromRelative</td>
+                                <td class="px-1 text-slate-600">→</td>
+                                <td class="px-3 py-2 font-mono text-white">
+                                    @op.ToRelative
+                                    @if (op.HasConflict)
+                                    {
+                                        <span class="block text-red-400">@op.Conflict</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+
+        @if (applyError is not null)
+        {
+            <p class="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">@applyError</p>
+        }
+    </div>
+
+    <div class="mt-6 flex justify-end gap-2">
+        <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800" @onclick="OnClose">
+            Cancel
+        </button>
+        <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                disabled="@(busy || plan is null || plan.IsEmpty || plan.HasConflicts)" @onclick="Apply">
+            Apply rename
+        </button>
+    </div>
+</Modal>
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public Guid ItemId { get; set; }
+    [Parameter] public string ItemTitle { get; set; } = string.Empty;
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnApplied { get; set; }
+
+    private RenamePlan? plan;
+    private bool busy;
+    private string? error;
+    private string? applyError;
+    private Guid loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Visible && ItemId != loadedFor)
+        {
+            loadedFor = ItemId;
+            plan = null;
+            error = null;
+            applyError = null;
+            await BuildAsync();
+        }
+        else if (!Visible)
+        {
+            loadedFor = Guid.Empty;
+        }
+    }
+
+    private async Task BuildAsync()
+    {
+        busy = true;
+        try
+        {
+            plan = await RenameService.BuildPlanAsync(ItemId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Apply()
+    {
+        busy = true;
+        applyError = null;
+        try
+        {
+            var result = await RenameService.ApplyAsync(ItemId);
+            if (result.Success)
+            {
+                await OnApplied.InvokeAsync();
+            }
+            else
+            {
+                applyError = result.Error;
+            }
+        }
+        catch (Exception ex)
+        {
+            applyError = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+}

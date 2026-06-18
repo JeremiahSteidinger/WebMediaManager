@@ -1,0 +1,178 @@
+@inject IIdentifyService IdentifyService
+@inject IMetadataProviderResolver Resolver
+
+<Modal Visible="Visible" Title="@($"Identify · {ItemTitle}")" OnClose="OnClose">
+    <div class="space-y-4">
+        <div class="flex gap-2">
+            <select class="rounded border border-slate-700 bg-slate-800 px-2 py-2 text-sm text-white" @bind="source">
+                @foreach (var s in availableSources)
+                {
+                    <option value="@s">@Label(s)</option>
+                }
+            </select>
+            <select class="rounded border border-slate-700 bg-slate-800 px-2 py-2 text-sm text-white" @bind="byId">
+                <option value="false">By title</option>
+                <option value="true">By ID</option>
+            </select>
+            <input class="min-w-0 flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white"
+                   @bind="query" @bind:event="oninput" @onkeydown="OnKeyDown"
+                   placeholder="@(byId ? $"{Label(source)} id, e.g. 27205" : "Search title…")" />
+            <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                    @onclick="Search" disabled="@busy">
+                @(byId ? "Look up" : "Search")
+            </button>
+        </div>
+
+        @if (error is not null)
+        {
+            <p class="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">@error</p>
+        }
+
+        @if (busy)
+        {
+            <p class="text-sm text-slate-400">Working…</p>
+        }
+        else if (results is { Count: 0 })
+        {
+            <p class="text-sm text-slate-400">No results.</p>
+        }
+
+        @if (results is { Count: > 0 })
+        {
+            <div class="max-h-96 space-y-2 overflow-y-auto pr-1">
+                @foreach (var r in results)
+                {
+                    <div class="flex gap-3 rounded-lg border border-slate-800 p-2">
+                        <div class="flex h-24 w-16 shrink-0 items-center justify-center overflow-hidden rounded bg-slate-800 text-slate-600">
+                            @if (r.PosterUrl is not null)
+                            {
+                                <img src="@r.PosterUrl" class="h-full w-full object-cover" alt="" />
+                            }
+                            else
+                            {
+                                <span class="text-xs">No image</span>
+                            }
+                        </div>
+                        <div class="min-w-0 flex-1">
+                            <div class="font-medium text-white">
+                                @r.Title <span class="text-slate-400">@(r.Year?.ToString())</span>
+                            </div>
+                            <p class="mt-1 line-clamp-3 text-xs text-slate-400">@r.Overview</p>
+                        </div>
+                        <button class="self-start rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+                                @onclick="() => Link(r)" disabled="@busy">
+                            Select
+                        </button>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+</Modal>
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public Guid ItemId { get; set; }
+    [Parameter] public string ItemTitle { get; set; } = string.Empty;
+    [Parameter] public int? ItemYear { get; set; }
+    [Parameter] public LibraryType LibraryType { get; set; }
+    [Parameter] public MetadataSource PreferredSource { get; set; } = MetadataSource.Tmdb;
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnLinked { get; set; }
+
+    private List<MetadataSource> availableSources = [];
+    private MetadataSource source = MetadataSource.Tmdb;
+    private bool byId;
+    private string query = string.Empty;
+    private List<MetadataSearchResult>? results;
+    private bool busy;
+    private string? error;
+    private Guid loadedFor;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Visible && ItemId != loadedFor)
+        {
+            // New target opened — reset and auto-search.
+            loadedFor = ItemId;
+            availableSources = Resolver.ProvidersFor(LibraryType).Select(p => p.Source).ToList();
+            source = availableSources.Contains(PreferredSource)
+                ? PreferredSource
+                : availableSources.FirstOrDefault(MetadataSource.Tmdb);
+            query = ItemTitle;
+            results = null;
+            error = null;
+            await Search();
+        }
+        else if (!Visible)
+        {
+            loadedFor = Guid.Empty;
+        }
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await Search();
+        }
+    }
+
+    private async Task Search()
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return;
+        }
+
+        busy = true;
+        error = null;
+        try
+        {
+            if (byId)
+            {
+                var hit = await IdentifyService.LookupByIdAsync(source, query.Trim(), LibraryType);
+                results = hit is null ? [] : [hit];
+            }
+            else
+            {
+                results = (await IdentifyService.SearchAsync(source, query, ItemYear, LibraryType)).ToList();
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            results = null;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Link(MetadataSearchResult result)
+    {
+        busy = true;
+        error = null;
+        try
+        {
+            await IdentifyService.LinkAsync(ItemId, result);
+            await OnLinked.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static string Label(MetadataSource s) => s switch
+    {
+        MetadataSource.Tmdb => "TMDB",
+        MetadataSource.Tvdb => "TVDB",
+        _ => s.ToString(),
+    };
+}

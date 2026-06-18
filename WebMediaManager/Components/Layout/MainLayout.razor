@@ -1,0 +1,35 @@
+@inherits LayoutComponentBase
+
+<div class="flex min-h-screen">
+    <aside class="w-60 shrink-0 border-r border-slate-800 bg-slate-900/60 p-4">
+        <div class="mb-8 px-2 text-xl font-semibold tracking-tight text-white">
+            Web<span class="text-sky-400">Media</span>Manager
+        </div>
+        <nav class="flex flex-col gap-1 text-sm">
+            <NavLink class="rounded px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white"
+                     ActiveClass="bg-slate-800 text-white" href="" Match="NavLinkMatch.All">
+                Dashboard
+            </NavLink>
+            <NavLink class="rounded px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white"
+                     ActiveClass="bg-slate-800 text-white" href="libraries">
+                Libraries
+            </NavLink>
+            <NavLink class="rounded px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white"
+                     ActiveClass="bg-slate-800 text-white" href="settings">
+                Settings
+            </NavLink>
+        </nav>
+    </aside>
+
+    <main class="flex-1 overflow-auto">
+        <div class="mx-auto max-w-6xl p-8">
+            @Body
+        </div>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>

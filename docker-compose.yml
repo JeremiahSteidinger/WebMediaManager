@@ -1,0 +1,6 @@
+services:
+  webmediamanager:
+    image: ${DOCKER_REGISTRY-}webmediamanager
+    build:
+      context: .
+      dockerfile: WebMediaManager/Dockerfile

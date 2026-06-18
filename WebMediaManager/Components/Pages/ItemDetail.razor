@@ -1,0 +1,187 @@
+@page "/item/{Id:guid}"
+@inject IMediaService MediaService
+@inject ISettingsService SettingsService
+
+<PageTitle>@(item?.Title ?? "Item")</PageTitle>
+
+@if (item is null)
+{
+    <p class="mt-6 text-slate-400">@(loaded ? "Item not found." : "Loading…")</p>
+}
+else
+{
+    <a class="text-sm text-slate-400 hover:text-white" href="@($"library/{item.LibraryId}")">← Back to library</a>
+
+    <div class="mt-2 flex items-start justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-white">
+                @item.Title <span class="font-normal text-slate-400">@(item.Year?.ToString())</span>
+            </h1>
+            <div class="mt-1 flex items-center gap-2">
+                <span class="@BadgeClass(item.MatchState)">@item.MatchState</span>
+                @if (item.HasNfo)
+                {
+                    <span class="rounded bg-sky-500/20 px-2 py-0.5 text-xs font-medium text-sky-300" title="Identified outside this app — an NFO file was found">NFO</span>
+                }
+            </div>
+        </div>
+        <div class="flex gap-2">
+            <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500" @onclick="() => showIdentify = true">
+                Identify
+            </button>
+            <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800" @onclick="() => showRename = true">
+                Rename
+            </button>
+        </div>
+    </div>
+
+    <div class="mt-6 flex flex-col gap-6 md:flex-row">
+        <div class="w-48 shrink-0">
+            <div class="relative flex aspect-[2/3] items-center justify-center overflow-hidden rounded-lg bg-slate-800 text-4xl font-bold text-slate-600">
+                @InitialOf(item.Title)
+                <img src="@($"art/{item.Id}")" alt="" class="absolute inset-0 h-full w-full object-cover" onerror="this.remove()" />
+            </div>
+        </div>
+
+        <div class="min-w-0 flex-1 space-y-4">
+            @if (!string.IsNullOrWhiteSpace(item.Plot))
+            {
+                <p class="text-sm leading-relaxed text-slate-300">@item.Plot</p>
+            }
+
+            <dl class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+                @if (item.Genres.Count > 0)
+                {
+                    <div class="col-span-2 sm:col-span-3">
+                        <dt class="text-slate-500">Genres</dt>
+                        <dd class="text-slate-200">@string.Join(", ", item.Genres)</dd>
+                    </div>
+                }
+                @if (item.Rating is { } rating)
+                {
+                    <div><dt class="text-slate-500">Rating</dt><dd class="text-slate-200">@rating.ToString("0.0")</dd></div>
+                }
+                @if (item is Movie { Runtime: { } runtime })
+                {
+                    <div><dt class="text-slate-500">Runtime</dt><dd class="text-slate-200">@runtime min</dd></div>
+                }
+                @if (item is TvShow show && show.Status != TvShowStatus.Unknown)
+                {
+                    <div><dt class="text-slate-500">Status</dt><dd class="text-slate-200">@show.Status</dd></div>
+                }
+                @if (!string.IsNullOrEmpty(item.TmdbId))
+                {
+                    <div><dt class="text-slate-500">TMDB</dt><dd class="text-slate-200">@item.TmdbId</dd></div>
+                }
+                @if (!string.IsNullOrEmpty(item.TvdbId))
+                {
+                    <div><dt class="text-slate-500">TVDB</dt><dd class="text-slate-200">@item.TvdbId</dd></div>
+                }
+                @if (!string.IsNullOrEmpty(item.ImdbId))
+                {
+                    <div><dt class="text-slate-500">IMDb</dt><dd class="text-slate-200">@item.ImdbId</dd></div>
+                }
+            </dl>
+
+            <div>
+                <dt class="text-xs text-slate-500">Path</dt>
+                <dd class="font-mono text-xs text-slate-400">@item.RelativePath</dd>
+            </div>
+        </div>
+    </div>
+
+    @if (item is TvShow tv)
+    {
+        <div class="mt-8 space-y-5">
+            @foreach (var season in tv.Seasons)
+            {
+                <div>
+                    <h2 class="text-sm font-semibold text-white">
+                        @(season.SeasonNumber == 0 ? "Specials" : $"Season {season.SeasonNumber}")
+                        <span class="font-normal text-slate-500">· @season.Episodes.Count episode(s)</span>
+                    </h2>
+                    <div class="mt-2 divide-y divide-slate-800 rounded-lg border border-slate-800">
+                        @foreach (var ep in season.Episodes)
+                        {
+                            <div class="flex items-baseline gap-3 px-3 py-2 text-sm">
+                                <span class="font-mono text-xs text-slate-500">
+                                    S@(season.SeasonNumber.ToString("00"))E@(ep.EpisodeNumber.ToString("00"))
+                                </span>
+                                <span class="text-slate-200">@(string.IsNullOrWhiteSpace(ep.Title) ? "—" : ep.Title)</span>
+                                @if (ep.AirDate is { } air)
+                                {
+                                    <span class="ml-auto text-xs text-slate-500">@air.ToString("yyyy-MM-dd")</span>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    <IdentifyDialog Visible="showIdentify"
+                    ItemId="item.Id"
+                    ItemTitle="@item.Title"
+                    ItemYear="item.Year"
+                    LibraryType="@(item is TvShow ? LibraryType.TvShows : LibraryType.Movies)"
+                    PreferredSource="PreferredSource()"
+                    OnClose="() => showIdentify = false"
+                    OnLinked="OnChanged" />
+
+    <RenamePreviewDialog Visible="showRename"
+                         ItemId="item.Id"
+                         ItemTitle="@item.Title"
+                         OnClose="() => showRename = false"
+                         OnApplied="OnChanged" />
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private MediaItem? item;
+    private bool loaded;
+    private bool showIdentify;
+    private bool showRename;
+    private MetadataSource preferredTvSource = MetadataSource.Tmdb;
+
+    protected override async Task OnInitializedAsync()
+    {
+        preferredTvSource = (await SettingsService.GetAsync()).Providers.PreferredTvSource;
+        await LoadAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loaded && item?.Id != Id)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        item = await MediaService.GetItemAsync(Id);
+        loaded = true;
+    }
+
+    private MetadataSource PreferredSource() =>
+        item is TvShow ? preferredTvSource : MetadataSource.Tmdb;
+
+    private async Task OnChanged()
+    {
+        showIdentify = false;
+        showRename = false;
+        await LoadAsync();
+    }
+
+    private static string InitialOf(string title) =>
+        string.IsNullOrWhiteSpace(title) ? "?" : title[..1].ToUpperInvariant();
+
+    private static string BadgeClass(MatchState state) => state switch
+    {
+        MatchState.Unmatched => "rounded px-2 py-0.5 text-xs font-medium bg-amber-500/20 text-amber-300",
+        MatchState.Matched => "rounded px-2 py-0.5 text-xs font-medium bg-emerald-500/20 text-emerald-300",
+        _ => "rounded px-2 py-0.5 text-xs font-medium bg-slate-600/30 text-slate-300",
+    };
+}

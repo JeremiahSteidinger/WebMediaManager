@@ -1,0 +1,49 @@
+@page "/"
+@inject ILibraryService LibraryService
+@inject IMediaService MediaService
+
+<PageTitle>WebMediaManager</PageTitle>
+
+<h1 class="text-2xl font-bold text-white">Dashboard</h1>
+<p class="mt-2 text-slate-400">Welcome to WebMediaManager — your media library, organized.</p>
+
+<div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+        <div class="text-sm font-medium text-slate-400">Libraries</div>
+        <div class="mt-1 text-3xl font-semibold text-white">@total</div>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+        <div class="text-sm font-medium text-slate-400">Movies</div>
+        <div class="mt-1 text-3xl font-semibold text-white">@movies</div>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+        <div class="text-sm font-medium text-slate-400">TV Shows</div>
+        <div class="mt-1 text-3xl font-semibold text-white">@shows</div>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+        <div class="text-sm font-medium text-slate-400">TV libraries</div>
+        <div class="mt-1 text-3xl font-semibold text-white">@tvLibs</div>
+    </div>
+</div>
+
+@if (total == 0)
+{
+    <div class="mt-8 rounded-lg border border-dashed border-slate-700 p-8 text-center text-slate-400">
+        No libraries yet. <a class="text-sky-400 hover:text-sky-300" href="libraries">Add one</a> to get started.
+    </div>
+}
+
+@code {
+    private int total;
+    private int tvLibs;
+    private int movies;
+    private int shows;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var libs = await LibraryService.GetAllAsync();
+        total = libs.Count;
+        tvLibs = libs.Count(l => l.Type == LibraryType.TvShows);
+        (movies, shows) = await MediaService.GetTotalsAsync();
+    }
+}

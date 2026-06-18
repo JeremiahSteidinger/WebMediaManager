@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <UserSecretsId>55a5032e-d85d-47e3-b9bb-82bbfe5d39b4</UserSecretsId>
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <DockerComposeProjectPath>..\docker-compose.dcproj</DockerComposeProjectPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.7.0" />
+    <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.23.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WebMediaManager.Core\WebMediaManager.Core.csproj" />
+    <ProjectReference Include="..\WebMediaManager.Data\WebMediaManager.Data.csproj" />
+  </ItemGroup>
+
+  <!-- Tailwind CSS via the standalone CLI (no Node needed at build or runtime). The platform-matched
+       binary is downloaded once into tools/ and cached; the input is compiled to wwwroot/app.css,
+       which App.razor serves via @Assets["app.css"]. -->
+  <PropertyGroup>
+    <TailwindVersion>v4.3.1</TailwindVersion>
+    <TailwindDir>$(MSBuildProjectDirectory)/tools/tailwind</TailwindDir>
+    <TailwindInput>$(MSBuildProjectDirectory)/Styles/app.tailwind.css</TailwindInput>
+    <TailwindOutput>$(MSBuildProjectDirectory)/wwwroot/app.css</TailwindOutput>
+    <TailwindArch>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant())</TailwindArch>
+  </PropertyGroup>
+
+  <!-- Platform-matched CLI asset. Top-level (not in a target) so $(TailwindExe) is known when the
+       download target's Condition is evaluated — otherwise it re-downloads on every build. -->
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <TailwindAsset>tailwindcss-windows-x64.exe</TailwindAsset>
+    <TailwindExe>$(TailwindDir)/tailwindcss.exe</TailwindExe>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <TailwindAsset Condition="'$(TailwindArch)' == 'arm64'">tailwindcss-linux-arm64</TailwindAsset>
+    <TailwindAsset Condition="'$(TailwindArch)' != 'arm64'">tailwindcss-linux-x64</TailwindAsset>
+    <TailwindExe>$(TailwindDir)/tailwindcss</TailwindExe>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <TailwindAsset Condition="'$(TailwindArch)' == 'arm64'">tailwindcss-macos-arm64</TailwindAsset>
+    <TailwindAsset Condition="'$(TailwindArch)' != 'arm64'">tailwindcss-macos-x64</TailwindAsset>
+    <TailwindExe>$(TailwindDir)/tailwindcss</TailwindExe>
+  </PropertyGroup>
+
+  <Target Name="DownloadTailwindCli" Condition="!Exists('$(TailwindExe)')">
+    <MakeDir Directories="$(TailwindDir)" />
+    <Message Importance="high" Text="Downloading Tailwind CLI $(TailwindVersion) ($(TailwindAsset))..." />
+    <DownloadFile SourceUrl="https://github.com/tailwindlabs/tailwindcss/releases/download/$(TailwindVersion)/$(TailwindAsset)"
+                  DestinationFolder="$(TailwindDir)"
+                  DestinationFileName="$([System.IO.Path]::GetFileName('$(TailwindExe)'))"
+                  SkipUnchangedFiles="true" />
+    <Exec Condition="!$([MSBuild]::IsOSPlatform('Windows'))" Command="chmod +x &quot;$(TailwindExe)&quot;" />
+  </Target>
+
+  <Target Name="BuildTailwindCss" DependsOnTargets="DownloadTailwindCli" BeforeTargets="Build;Publish">
+    <Message Importance="high" Text="Compiling Tailwind CSS -> $(TailwindOutput)" />
+    <Exec Command="&quot;$(TailwindExe)&quot; -i &quot;$(TailwindInput)&quot; -o &quot;$(TailwindOutput)&quot; --minify" />
+  </Target>
+
+</Project>

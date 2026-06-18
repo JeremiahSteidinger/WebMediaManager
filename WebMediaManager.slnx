@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="docker-compose.dcproj">
+    <Build />
+  </Project>
+  <Project Path="WebMediaManager.Core/WebMediaManager.Core.csproj" />
+  <Project Path="WebMediaManager.Data/WebMediaManager.Data.csproj" />
+  <Project Path="WebMediaManager.Tests/WebMediaManager.Tests.csproj" />
+  <Project Path="WebMediaManager/WebMediaManager.csproj" />
+</Solution>

@@ -1,0 +1,211 @@
+@page "/library/{Id:guid}"
+@implements IDisposable
+@inject ILibraryService LibraryService
+@inject IMediaService MediaService
+@inject IJobQueue JobQueue
+@inject IScanProgressService Progress
+@inject NavigationManager Nav
+
+<PageTitle>@(library?.Name ?? "Library")</PageTitle>
+
+@if (library is null)
+{
+    <p class="mt-6 text-slate-400">Loading…</p>
+}
+else
+{
+    <div class="flex items-center justify-between">
+        <div>
+            <a class="text-sm text-slate-400 hover:text-white" href="libraries">← Libraries</a>
+            <h1 class="mt-1 text-2xl font-bold text-white">@library.Name</h1>
+            <p class="text-sm text-slate-400">
+                @(library.Type == LibraryType.Movies ? "Movies" : "TV Shows") ·
+                <span class="font-mono text-xs">@library.RootPath</span>
+            </p>
+        </div>
+        <div>
+            @if (progress.IsActive)
+            {
+                <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                        @onclick="CancelScan">
+                    Cancel scan
+                </button>
+            }
+            else
+            {
+                <div class="flex gap-2">
+                    <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500"
+                            @onclick="StartScan">
+                        Scan library
+                    </button>
+                    <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                            title="Re-read NFO files and artwork from disk into all items (no files are changed)"
+                            @onclick="Reimport">
+                        Re-import
+                    </button>
+                </div>
+            }
+        </div>
+    </div>
+
+    @if (progress.State is not ScanState.Idle)
+    {
+        <div class="mt-4 rounded-lg border border-slate-800 bg-slate-900/50 p-4 text-sm">
+            @switch (progress.State)
+            {
+                case ScanState.Queued:
+                    <span class="text-slate-300">Queued…</span>
+                    break;
+                case ScanState.Running:
+                    <span class="text-sky-300">Scanning… found @progress.Found</span>
+                    @if (progress.Current is not null)
+                    {
+                        <span class="ml-2 font-mono text-xs text-slate-500">@progress.Current</span>
+                    }
+                    break;
+                case ScanState.Completed:
+                    <span class="text-emerald-400">Scan complete — added @progress.Found item(s).</span>
+                    @if (progress.Current is not null)
+                    {
+                        <span class="ml-2 text-amber-400">@progress.Current</span>
+                    }
+                    break;
+                case ScanState.Cancelled:
+                    <span class="text-amber-400">Scan cancelled.</span>
+                    break;
+                case ScanState.Failed:
+                    <span class="text-red-400">Scan failed: @progress.Error</span>
+                    break;
+            }
+        </div>
+    }
+
+    <div class="mt-6 flex gap-1 text-sm">
+        @foreach (var option in Filters)
+        {
+            <button class="@FilterClass(option.State)" @onclick="() => SetFilter(option.State)">@option.Label</button>
+        }
+    </div>
+
+    @if (items.Count == 0)
+    {
+        <div class="mt-8 rounded-lg border border-dashed border-slate-700 p-10 text-center text-slate-400">
+            @(filter is null ? "No items yet. Scan the library to discover media." : "No items match this filter.")
+        </div>
+    }
+    else
+    {
+        <div class="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+            @foreach (var item in items)
+            {
+                <a class="block overflow-hidden rounded-lg border border-slate-800 bg-slate-900/50 hover:border-sky-600"
+                   href="@($"item/{item.Id}")">
+                    <div class="relative flex aspect-[2/3] items-center justify-center bg-slate-800 text-3xl font-bold text-slate-600">
+                        @InitialOf(item.Title)
+                        @* Always attempt the poster; /art 404s for items without artwork and the image self-removes. *@
+                        <img src="@($"art/{item.Id}")" alt="" loading="lazy"
+                             class="absolute inset-0 h-full w-full object-cover" onerror="this.remove()" />
+                    </div>
+                    <div class="p-3">
+                        <div class="truncate text-sm font-medium text-white" title="@item.Title">@item.Title</div>
+                        <div class="mt-1 flex items-center justify-between gap-1">
+                            <span class="text-xs text-slate-400">@(item.Year?.ToString() ?? "—")</span>
+                            <span class="flex gap-1">
+                                @if (item.HasNfo)
+                                {
+                                    <span class="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">NFO</span>
+                                }
+                                <span class="@BadgeClass(item.MatchState)">@item.MatchState</span>
+                            </span>
+                        </div>
+                    </div>
+                </a>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private static readonly (string Label, MatchState? State)[] Filters =
+    [
+        ("All", null),
+        ("Unmatched", MatchState.Unmatched),
+        ("Matched", MatchState.Matched),
+    ];
+
+    private Library? library;
+    private List<MediaItem> items = [];
+    private MatchState? filter;
+
+    private ScanProgress progress => Progress.Get(Id);
+
+    protected override async Task OnInitializedAsync()
+    {
+        Progress.Changed += OnProgressChanged;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        library = await LibraryService.GetByIdAsync(Id);
+        if (library is not null)
+        {
+            items = (await MediaService.GetItemsAsync(Id, filter)).ToList();
+        }
+    }
+
+    private void StartScan()
+    {
+        Progress.Set(new ScanProgress(Id, ScanState.Queued, 0, "Queued…", null));
+        JobQueue.EnqueueScan(Id);
+    }
+
+    private void Reimport()
+    {
+        Progress.Set(new ScanProgress(Id, ScanState.Queued, 0, "Queued (re-import)…", null));
+        JobQueue.EnqueueScan(Id, reimport: true);
+    }
+
+    private void CancelScan() => Progress.RequestCancel(Id);
+
+    private async Task SetFilter(MatchState? state)
+    {
+        filter = state;
+        await LoadAsync();
+    }
+
+    private void OnProgressChanged(ScanProgress p)
+    {
+        if (p.LibraryId != Id)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            if (p.State == ScanState.Completed)
+            {
+                await LoadAsync();
+            }
+            StateHasChanged();
+        });
+    }
+
+    private string FilterClass(MatchState? state) => filter == state
+        ? "rounded bg-slate-800 px-3 py-1.5 font-medium text-white"
+        : "rounded px-3 py-1.5 text-slate-400 hover:text-white";
+
+    private static string InitialOf(string title) =>
+        string.IsNullOrWhiteSpace(title) ? "?" : title[..1].ToUpperInvariant();
+
+    private static string BadgeClass(MatchState state) => state switch
+    {
+        MatchState.Unmatched => "rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/20 text-amber-300",
+        MatchState.Matched => "rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-500/20 text-emerald-300",
+        _ => "rounded px-1.5 py-0.5 text-[10px] font-medium bg-slate-600/30 text-slate-300",
+    };
+
+    public void Dispose() => Progress.Changed -= OnProgressChanged;
+}

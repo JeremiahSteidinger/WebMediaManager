@@ -1,0 +1,220 @@
+@page "/settings"
+@inject ISettingsService SettingsService
+@inject ITokenEngine TokenEngine
+
+<PageTitle>Settings</PageTitle>
+
+<h1 class="text-2xl font-bold text-white">Settings</h1>
+
+@if (settings is null)
+{
+    <p class="mt-6 text-slate-400">Loading…</p>
+}
+else
+{
+    <div class="mt-6 flex gap-1 border-b border-slate-800 text-sm">
+        @foreach (var tab in Tabs)
+        {
+            <button class="@TabClass(tab)" @onclick="() => SelectTab(tab)">@tab</button>
+        }
+    </div>
+
+    <div class="mt-6 max-w-2xl">
+        @if (activeTab == "Providers")
+        {
+            <div class="space-y-5">
+                <div>
+                    <label class="@LabelClass">TMDB API key (v4 bearer token)</label>
+                    <input class="@InputClass font-mono" @bind="settings.Providers.TmdbApiKey" @bind:after="ResetSaved" />
+                </div>
+                <div>
+                    <label class="@LabelClass">TVDB API key</label>
+                    <input class="@InputClass font-mono" @bind="settings.Providers.TvdbApiKey" @bind:after="ResetSaved" />
+                </div>
+                <div>
+                    <label class="@LabelClass">TVDB subscriber PIN (optional)</label>
+                    <input class="@InputClass font-mono" @bind="settings.Providers.TvdbPin" @bind:after="ResetSaved" />
+                </div>
+                <div>
+                    <label class="@LabelClass">Preferred TV source</label>
+                    <select class="@InputClass" @bind="settings.Providers.PreferredTvSource" @bind:after="ResetSaved">
+                        <option value="@MetadataSource.Tmdb">TMDB</option>
+                        <option value="@MetadataSource.Tvdb">TVDB</option>
+                    </select>
+                </div>
+            </div>
+        }
+        else if (activeTab == "Rename patterns")
+        {
+            <div class="space-y-5">
+                <div class="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+                    <div class="mb-2 text-xs text-slate-400">Drag a token into any field below (or type it):</div>
+                    <div class="flex flex-wrap gap-1.5">
+                        @foreach (var token in TokenChips)
+                        {
+                            <span draggable="true" data-token="@token"
+                                  ondragstart="event.dataTransfer.setData('text/plain', this.dataset.token); event.dataTransfer.effectAllowed='copy';"
+                                  class="cursor-grab select-none rounded bg-slate-700 px-2 py-1 font-mono text-xs text-slate-200 hover:bg-slate-600"
+                                  title="Drag into a field">@token</span>
+                        }
+                    </div>
+                </div>
+                <div>
+                    <label class="@LabelClass">Movie folder <span class="font-normal text-slate-500">(blank = unchanged)</span></label>
+                    <input class="@InputClass font-mono" @bind="settings.RenamePatterns.MovieFolder" @bind:event="oninput" @bind:after="ResetSaved" />
+                    <p class="@PreviewLineClass(settings.RenamePatterns.MovieFolder)">@PreviewText(settings.RenamePatterns.MovieFolder, SampleMovie, "", "Left blank — movie folders won't be renamed")</p>
+                </div>
+                <div>
+                    <label class="@LabelClass">Movie file <span class="font-normal text-slate-500">(blank = unchanged)</span></label>
+                    <input class="@InputClass font-mono" @bind="settings.RenamePatterns.MovieFile" @bind:event="oninput" @bind:after="ResetSaved" />
+                    <p class="@PreviewLineClass(settings.RenamePatterns.MovieFile)">@PreviewText(settings.RenamePatterns.MovieFile, SampleMovie, ".mkv", "Left blank — movie files won't be renamed")</p>
+                </div>
+                <div>
+                    <label class="@LabelClass">Show folder <span class="font-normal text-slate-500">(blank = unchanged)</span></label>
+                    <input class="@InputClass font-mono" @bind="settings.RenamePatterns.ShowFolder" @bind:event="oninput" @bind:after="ResetSaved" />
+                    <p class="@PreviewLineClass(settings.RenamePatterns.ShowFolder)">@PreviewText(settings.RenamePatterns.ShowFolder, SampleShow, "", "Left blank — show folders won't be renamed")</p>
+                </div>
+                <div>
+                    <label class="@LabelClass">Season folder <span class="font-normal text-slate-500">(blank = unchanged)</span></label>
+                    <input class="@InputClass font-mono" @bind="settings.RenamePatterns.SeasonFolder" @bind:event="oninput" @bind:after="ResetSaved" />
+                    <p class="@PreviewLineClass(settings.RenamePatterns.SeasonFolder)">@PreviewText(settings.RenamePatterns.SeasonFolder, SampleSeason, "", "Left blank — season folders won't be renamed")</p>
+                </div>
+                <div>
+                    <label class="@LabelClass">Episode file <span class="font-normal text-slate-500">(blank = unchanged)</span></label>
+                    <input class="@InputClass font-mono" @bind="settings.RenamePatterns.EpisodeFile" @bind:event="oninput" @bind:after="ResetSaved" />
+                    <p class="@PreviewLineClass(settings.RenamePatterns.EpisodeFile)">@PreviewText(settings.RenamePatterns.EpisodeFile, SampleEpisode, ".mkv", "Left blank — episode files won't be renamed")</p>
+                </div>
+                <p class="text-xs text-slate-500">
+                    Wrap an optional part in <code>&lt;…&gt;</code> to drop it when its token is empty
+                    (e.g. <code>{title} &lt;[tmdb-{tmdbid}]&gt;</code>). Leave a field blank to skip renaming it.
+                    Previews use a sample item.
+                </p>
+            </div>
+        }
+        else if (activeTab == "NFO")
+        {
+            <div class="space-y-3">
+                <label class="@CheckLabelClass">
+                    <input type="checkbox" class="@CheckClass" @bind="settings.Nfo.WriteMovieNfo" @bind:after="ResetSaved" />
+                    Write movie.nfo
+                </label>
+                <label class="@CheckLabelClass">
+                    <input type="checkbox" class="@CheckClass" @bind="settings.Nfo.WriteTvShowNfo" @bind:after="ResetSaved" />
+                    Write tvshow.nfo
+                </label>
+                <label class="@CheckLabelClass">
+                    <input type="checkbox" class="@CheckClass" @bind="settings.Nfo.WriteEpisodeNfo" @bind:after="ResetSaved" />
+                    Write episode .nfo
+                </label>
+                <p class="text-xs text-slate-500">NFO files are written in the Kodi format, readable by Jellyfin and Emby.</p>
+            </div>
+        }
+        else if (activeTab == "Artwork")
+        {
+            <div class="space-y-5">
+                <div class="space-y-3">
+                    <label class="@CheckLabelClass">
+                        <input type="checkbox" class="@CheckClass" @bind="settings.Artwork.DownloadPoster" @bind:after="ResetSaved" />
+                        Download poster
+                    </label>
+                    <label class="@CheckLabelClass">
+                        <input type="checkbox" class="@CheckClass" @bind="settings.Artwork.DownloadFanart" @bind:after="ResetSaved" />
+                        Download fanart
+                    </label>
+                </div>
+                <div>
+                    <label class="@LabelClass">Poster filename</label>
+                    <input class="@InputClass font-mono" @bind="settings.Artwork.PosterFilename" @bind:after="ResetSaved" />
+                </div>
+                <div>
+                    <label class="@LabelClass">Fanart filename</label>
+                    <input class="@InputClass font-mono" @bind="settings.Artwork.FanartFilename" @bind:after="ResetSaved" />
+                </div>
+            </div>
+        }
+    </div>
+
+    <div class="mt-8 flex items-center gap-3">
+        <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500" @onclick="Save">
+            Save
+        </button>
+        @if (saved)
+        {
+            <span class="text-sm text-emerald-400">Saved.</span>
+        }
+    </div>
+}
+
+@code {
+    private const string LabelClass = "block text-sm font-medium text-slate-300";
+    private const string InputClass = "mt-1 w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white";
+    private const string CheckLabelClass = "flex items-center gap-2 text-sm text-slate-300";
+    private const string CheckClass = "h-4 w-4 rounded border-slate-600 bg-slate-800";
+    private const string PreviewClass = "mt-1 font-mono text-xs text-emerald-400/80";
+    private const string BlankNoteClass = "mt-1 text-xs italic text-amber-400/80";
+
+    private static readonly Dictionary<string, string?> SampleMovie = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["title"] = "Inception", ["originaltitle"] = "Inception", ["sorttitle"] = "Inception",
+        ["year"] = "2010", ["tmdbid"] = "27205", ["imdbid"] = "tt1375666", ["rating"] = "8.3",
+    };
+
+    private static readonly Dictionary<string, string?> SampleShow = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["showtitle"] = "Breaking Bad", ["title"] = "Breaking Bad", ["year"] = "2008",
+        ["tvdbid"] = "81189", ["tmdbid"] = "1396", ["imdbid"] = "tt0903747", ["status"] = "Ended",
+    };
+
+    private static readonly Dictionary<string, string?> SampleSeason = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["showtitle"] = "Breaking Bad", ["year"] = "2008", ["seasonNr"] = "1", ["seasonNr2"] = "01",
+    };
+
+    private static readonly Dictionary<string, string?> SampleEpisode = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["showtitle"] = "Breaking Bad", ["year"] = "2008", ["seasonNr"] = "1", ["seasonNr2"] = "01",
+        ["episodeNr"] = "2", ["episodeNr2"] = "02", ["title"] = "Cat's in the Bag...", ["airdate"] = "2008-01-27",
+    };
+
+    private string Preview(string pattern, IReadOnlyDictionary<string, string?> tokens) =>
+        FilenameSanitizer.Sanitize(TokenEngine.Render(pattern, tokens));
+
+    // Blank pattern => amber "won't be renamed" note; otherwise the emerald sample preview.
+    private static string PreviewLineClass(string? pattern) =>
+        string.IsNullOrWhiteSpace(pattern) ? BlankNoteClass : PreviewClass;
+
+    private string PreviewText(string pattern, IReadOnlyDictionary<string, string?> tokens, string suffix, string blankNote) =>
+        string.IsNullOrWhiteSpace(pattern) ? blankNote : "→ " + Preview(pattern, tokens) + suffix;
+
+    private static readonly string[] Tabs = { "Providers", "Rename patterns", "NFO", "Artwork" };
+
+    private static readonly string[] TokenChips =
+    [
+        "{title}", "{originaltitle}", "{sorttitle}", "{year}", "{tmdbid}", "{imdbid}", "{rating}",
+        "{showtitle}", "{status}", "{seasonNr2}", "{episodeNr2}", "{airdate}",
+    ];
+
+    private AppSettings? settings;
+    private string activeTab = "Providers";
+    private bool saved;
+
+    protected override async Task OnInitializedAsync() => settings = await SettingsService.GetAsync();
+
+    private void SelectTab(string tab)
+    {
+        activeTab = tab;
+        saved = false;
+    }
+
+    private void ResetSaved() => saved = false;
+
+    private string TabClass(string tab) => tab == activeTab
+        ? "border-b-2 border-sky-500 px-3 py-2 font-medium text-white"
+        : "border-b-2 border-transparent px-3 py-2 text-slate-400 hover:text-white";
+
+    private async Task Save()
+    {
+        await SettingsService.SaveAsync(settings!);
+        saved = true;
+    }
+}

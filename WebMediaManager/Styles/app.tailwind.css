@@ -1,0 +1,11 @@
+@import "tailwindcss" source(none);
+
+/* Explicit template sources keep detection deterministic and avoid scanning bin/obj. */
+@source "../Components/**/*.{razor,html}";
+
+/* App-wide defaults. The media manager uses a dark UI by default. */
+@layer base {
+    html, body {
+        @apply h-full bg-slate-950 text-slate-100 antialiased;
+    }
+}
