@@ -35,6 +35,9 @@ namespace WebMediaManager
             builder.Services.AddScoped<ISettingsService, SettingsService>();
             builder.Services.AddScoped<IMediaService, MediaService>();
 
+            // Stateless server-side filesystem browsing for the library folder picker.
+            builder.Services.AddSingleton<IDirectoryBrowserService, DirectoryBrowserService>();
+
             // Background scanning: a singleton queue + progress hub, one hosted worker, scoped scanner.
             builder.Services.AddSingleton<IJobQueue, JobQueue>();
             builder.Services.AddSingleton<IScanProgressService, ScanProgressService>();

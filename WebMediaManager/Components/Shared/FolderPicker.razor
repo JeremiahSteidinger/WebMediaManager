@@ -1,0 +1,108 @@
+@inject IDirectoryBrowserService Browser
+
+<Modal Visible="Visible" Title="Select folder" OnClose="OnClose" MaxWidthClass="max-w-xl">
+    <div class="space-y-3">
+        <div class="flex items-center gap-2">
+            <button type="button"
+                    class="shrink-0 rounded border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                    @onclick="GoUp" disabled="@(listing.CurrentPath is null)">
+                ↑ Up
+            </button>
+            <div class="flex-1 truncate rounded border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-xs text-slate-300">
+                @(listing.CurrentPath ?? "Computer")
+            </div>
+        </div>
+
+        <div class="h-64 overflow-y-auto rounded border border-slate-800 bg-slate-900/40">
+            @if (listing.Directories.Count == 0)
+            {
+                <p class="px-3 py-4 text-sm text-slate-500">No sub-folders here.</p>
+            }
+            else
+            {
+                @foreach (var dir in listing.Directories)
+                {
+                    <button type="button"
+                            class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-800"
+                            @onclick="() => Open(dir.FullPath)">
+                        <span class="text-amber-400">📁</span>
+                        <span class="truncate">@dir.Name</span>
+                    </button>
+                }
+            }
+        </div>
+
+        @if (error is not null)
+        {
+            <p class="text-sm text-red-400">@error</p>
+        }
+    </div>
+
+    <div class="mt-6 flex items-center justify-end gap-2">
+        <button type="button"
+                class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                @onclick="OnClose">
+            Cancel
+        </button>
+        <button type="button"
+                class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                @onclick="Select" disabled="@(listing.CurrentPath is null)">
+            Select this folder
+        </button>
+    </div>
+</Modal>
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+
+    /// <summary>Path to open the picker at; falls back to the roots if it doesn't exist.</summary>
+    [Parameter] public string? InitialPath { get; set; }
+
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    /// <summary>Invoked with the chosen folder's full path.</summary>
+    [Parameter] public EventCallback<string> OnSelected { get; set; }
+
+    private DirectoryListing listing = new(null, null, Array.Empty<DirectoryEntry>());
+    private string? error;
+    private bool loaded;
+
+    protected override void OnParametersSet()
+    {
+        // Load once each time the picker opens, starting from the current input value.
+        if (Visible && !loaded)
+        {
+            Load(InitialPath);
+            loaded = true;
+        }
+        else if (!Visible)
+        {
+            loaded = false;
+        }
+    }
+
+    private void Load(string? path)
+    {
+        try
+        {
+            listing = Browser.List(path);
+            error = null;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+    }
+
+    private void Open(string path) => Load(path);
+
+    private void GoUp() => Load(listing.ParentPath); // null parent → back to the roots
+
+    private async Task Select()
+    {
+        if (listing.CurrentPath is not null)
+        {
+            await OnSelected.InvokeAsync(listing.CurrentPath);
+        }
+    }
+}

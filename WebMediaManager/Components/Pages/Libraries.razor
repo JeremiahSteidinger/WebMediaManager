@@ -2,6 +2,7 @@
 @inject ILibraryService LibraryService
 @inject IMediaService MediaService
 @inject IJobQueue JobQueue
+@inject IDirectoryBrowserService DirectoryBrowser
 @inject NavigationManager Nav
 
 <PageTitle>Libraries</PageTitle>
@@ -89,9 +90,32 @@ else
         </div>
         <div>
             <label class="block text-sm font-medium text-slate-300">Root path</label>
-            <input class="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-xs text-white"
-                   @bind="editing.RootPath" placeholder="/media/movies" />
-            <p class="mt-1 text-xs text-slate-500">Path as seen by the app (e.g. the container mount point).</p>
+            <div class="mt-1 flex gap-2">
+                <input class="w-full rounded border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-xs text-white"
+                       @bind="editing.RootPath" @bind:event="oninput" @bind:after="ValidateRootPath"
+                       placeholder="/media/movies" />
+                <button type="button"
+                        class="shrink-0 rounded border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                        @onclick="() => showPicker = true">
+                    Browse…
+                </button>
+            </div>
+            @if (rootPathExists == true)
+            {
+                <p class="mt-1 flex items-center gap-1 text-xs text-emerald-400">
+                    <span aria-hidden="true">✓</span> Folder found on the server.
+                </p>
+            }
+            else if (rootPathExists == false)
+            {
+                <p class="mt-1 flex items-center gap-1 text-xs text-red-400">
+                    <span aria-hidden="true">✕</span> No folder at this path on the server (it may still exist in your deployment environment).
+                </p>
+            }
+            else
+            {
+                <p class="mt-1 text-xs text-slate-500">Path as seen by the app (e.g. the container mount point).</p>
+            }
         </div>
         @if (error is not null)
         {
@@ -109,6 +133,11 @@ else
         </button>
     </div>
 </Modal>
+
+<FolderPicker Visible="showPicker"
+              InitialPath="@editing.RootPath"
+              OnClose="() => showPicker = false"
+              OnSelected="OnFolderPicked" />
 
 <Modal Visible="deleteTarget is not null" Title="Delete library" OnClose="() => deleteTarget = null">
     <p class="text-sm text-slate-300">
@@ -132,6 +161,8 @@ else
     private IReadOnlyDictionary<Guid, int> counts = new Dictionary<Guid, int>();
     private Library editing = new();
     private bool showEditor;
+    private bool showPicker;
+    private bool? rootPathExists;
     private string? error;
     private Library? deleteTarget;
 
@@ -167,6 +198,7 @@ else
     {
         editing = new Library { Type = LibraryType.Movies };
         error = null;
+        ValidateRootPath();
         showEditor = true;
     }
 
@@ -182,10 +214,25 @@ else
             CreatedUtc = lib.CreatedUtc,
         };
         error = null;
+        ValidateRootPath();
         showEditor = true;
     }
 
     private void CloseEditor() => showEditor = false;
+
+    private void OnFolderPicked(string path)
+    {
+        editing.RootPath = path;
+        ValidateRootPath();
+        showPicker = false;
+    }
+
+    // Reflects whether the typed/picked path resolves to a real folder on the server. Non-blocking:
+    // a path may legitimately be absent here yet present in the deployment environment (e.g. a container mount).
+    private void ValidateRootPath() =>
+        rootPathExists = string.IsNullOrWhiteSpace(editing.RootPath)
+            ? null
+            : DirectoryBrowser.Exists(editing.RootPath);
 
     private async Task Save()
     {
