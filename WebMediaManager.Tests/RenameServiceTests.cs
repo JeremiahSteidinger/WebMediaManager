@@ -157,6 +157,7 @@ public sealed class RenameServiceTests : IDisposable
         new TokenEngine(),
         new PhysicalFileSystem(),
         new RenamePlanner(),
+        new NoopActivityLog(),
         NullLogger<RenameService>.Instance);
 
     public void Dispose()

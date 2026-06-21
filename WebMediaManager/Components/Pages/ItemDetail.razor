@@ -1,4 +1,5 @@
 @page "/item/{Id:guid}"
+@using WebMediaManager.Core.Scanning
 @inject IMediaService MediaService
 @inject ISettingsService SettingsService
 
@@ -26,6 +27,12 @@ else
             </div>
         </div>
         <div class="flex gap-2">
+            @if (item is Movie { VideoFilePath.Length: > 0 })
+            {
+                <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800" @onclick="() => showPlayer = !showPlayer">
+                    @(showPlayer ? "Stop" : "▶ Play")
+                </button>
+            }
             <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500" @onclick="() => showIdentify = true">
                 Identify
             </button>
@@ -90,6 +97,15 @@ else
         </div>
     </div>
 
+    @if (showPlayer && item is Movie { VideoFilePath.Length: > 0 } movieItem)
+    {
+        <div class="mt-6">
+            <video controls autoplay playsinline class="max-h-[70vh] w-full rounded-lg bg-black"
+                   src="@($"media/movie/{item.Id}")"></video>
+            @VideoCaption(movieItem.VideoFilePath, $"media/movie/{item.Id}")
+        </div>
+    }
+
     @if (item is TvShow tv)
     {
         <div class="mt-8 space-y-5">
@@ -103,14 +119,32 @@ else
                     <div class="mt-2 divide-y divide-slate-800 rounded-lg border border-slate-800">
                         @foreach (var ep in season.Episodes)
                         {
-                            <div class="flex items-baseline gap-3 px-3 py-2 text-sm">
-                                <span class="font-mono text-xs text-slate-500">
-                                    S@(season.SeasonNumber.ToString("00"))E@(ep.EpisodeNumber.ToString("00"))
-                                </span>
-                                <span class="text-slate-200">@(string.IsNullOrWhiteSpace(ep.Title) ? "—" : ep.Title)</span>
-                                @if (ep.AirDate is { } air)
+                            <div class="px-3 py-2 text-sm">
+                                <div class="flex items-baseline gap-3">
+                                    <span class="font-mono text-xs text-slate-500">
+                                        S@(season.SeasonNumber.ToString("00"))E@(ep.EpisodeNumber.ToString("00"))
+                                    </span>
+                                    <span class="text-slate-200">@(string.IsNullOrWhiteSpace(ep.Title) ? "—" : ep.Title)</span>
+                                    <div class="ml-auto flex shrink-0 items-center gap-3">
+                                        @if (ep.AirDate is { } air)
+                                        {
+                                            <span class="text-xs text-slate-500">@air.ToString("yyyy-MM-dd")</span>
+                                        }
+                                        @if (ep.VideoFilePath.Length > 0)
+                                        {
+                                            <button class="text-xs text-sky-400 hover:text-sky-300" @onclick="() => ToggleEpisode(ep.Id)">
+                                                @(playingEpisodeId == ep.Id ? "Stop" : "▶ Play")
+                                            </button>
+                                        }
+                                    </div>
+                                </div>
+                                @if (playingEpisodeId == ep.Id)
                                 {
-                                    <span class="ml-auto text-xs text-slate-500">@air.ToString("yyyy-MM-dd")</span>
+                                    <div class="mt-2">
+                                        <video controls autoplay playsinline class="max-h-[70vh] w-full rounded bg-black"
+                                               src="@($"media/episode/{ep.Id}")"></video>
+                                        @VideoCaption(ep.VideoFilePath, $"media/episode/{ep.Id}")
+                                    </div>
                                 }
                             </div>
                         }
@@ -143,11 +177,16 @@ else
     private bool loaded;
     private bool showIdentify;
     private bool showRename;
+    private bool showPlayer;
+    private Guid? playingEpisodeId;
     private MetadataSource preferredTvSource = MetadataSource.Tmdb;
+    private MetadataSource preferredMovieSource = MetadataSource.Tmdb;
 
     protected override async Task OnInitializedAsync()
     {
-        preferredTvSource = (await SettingsService.GetAsync()).Providers.PreferredTvSource;
+        var providers = (await SettingsService.GetAsync()).Providers;
+        preferredTvSource = providers.PreferredTvSource;
+        preferredMovieSource = providers.PreferredMovieSource;
         await LoadAsync();
     }
 
@@ -161,12 +200,36 @@ else
 
     private async Task LoadAsync()
     {
+        // Reset any open player when the item changes.
+        showPlayer = false;
+        playingEpisodeId = null;
         item = await MediaService.GetItemAsync(Id);
         loaded = true;
     }
 
+    private void ToggleEpisode(Guid id) => playingEpisodeId = playingEpisodeId == id ? null : id;
+
+    // Filename + open-in-new-tab fallback, with a note when the container won't play inline.
+    private RenderFragment VideoCaption(string videoPath, string url) =>@<p class="mt-2 flex flex-wrap items-center gap-x-2 text-xs text-slate-500">
+        <span class="font-mono">@FileName(videoPath)</span>
+        <span>·</span>
+        <a class="text-sky-400 hover:text-sky-300" href="@url" target="_blank" rel="noopener">Open in new tab</a>
+        @if (!VideoExtensions.IsBrowserPlayable(videoPath))
+        {
+            <span class="text-amber-400/80">— @ContainerLabel(videoPath) may not play in the browser; use “Open in new tab” or an external player.</span>
+        }
+    </p>;
+
+    private static string FileName(string path) => System.IO.Path.GetFileName(path);
+
+    private static string ContainerLabel(string path)
+    {
+        var ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+        return string.IsNullOrEmpty(ext) ? "This file" : $"{ext} files";
+    }
+
     private MetadataSource PreferredSource() =>
-        item is TvShow ? preferredTvSource : MetadataSource.Tmdb;
+        item is TvShow ? preferredTvSource : preferredMovieSource;
 
     private async Task OnChanged()
     {

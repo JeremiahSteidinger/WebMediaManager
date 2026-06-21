@@ -185,6 +185,111 @@ public sealed class MediaScannerTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Scan_removes_movie_whose_folder_no_longer_exists()
+    {
+        var keep = Path.Combine(_root, "Keeper (2000)");
+        var gone = Path.Combine(_root, "Gone (1999)");
+        Directory.CreateDirectory(keep);
+        Directory.CreateDirectory(gone);
+        File.WriteAllText(Path.Combine(keep, "Keeper (2000).mkv"), "x");
+        File.WriteAllText(Path.Combine(gone, "Gone (1999).mkv"), "x");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.Movies);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(2, await db.Movies.CountAsync());
+        }
+
+        // The folder disappears from disk (renamed/removed out-of-band by another instance).
+        Directory.Delete(gone, recursive: true);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            var movie = await db.Movies.SingleAsync();
+            Assert.Equal("Keeper", movie.Title);
+        }
+    }
+
+    [Fact]
+    public async Task Reimport_prunes_renamed_folder_leaving_only_the_current_one()
+    {
+        // Reproduces the production case: a folder identified+renamed on another instance leaves the old
+        // record orphaned. The new folder is picked up as a fresh item; the stale record must be pruned.
+        var oldDir = Path.Combine(_root, "Movie");
+        Directory.CreateDirectory(oldDir);
+        File.WriteAllText(Path.Combine(oldDir, "Movie.mkv"), "x");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.Movies);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        var newDir = Path.Combine(_root, "Movie (2010)");
+        Directory.Move(oldDir, newDir);
+
+        await scanner.ScanAsync(libraryId, reimport: true, CancellationToken.None);
+
+        await using var db = _factory.CreateDbContext();
+        var movie = await db.Movies.SingleAsync();
+        Assert.Equal(Path.GetRelativePath(_root, newDir), movie.RelativePath);
+    }
+
+    [Fact]
+    public async Task Scan_removes_tv_show_whose_folder_no_longer_exists_and_cascades_children()
+    {
+        var keepDir = Path.Combine(_root, "Firefly", "Season 01");
+        var goneDir = Path.Combine(_root, "Angel", "Season 01");
+        Directory.CreateDirectory(keepDir);
+        Directory.CreateDirectory(goneDir);
+        File.WriteAllText(Path.Combine(keepDir, "Firefly S01E01.mkv"), "x");
+        File.WriteAllText(Path.Combine(goneDir, "Angel S01E01.mkv"), "x");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.TvShows);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(2, await db.TvShows.CountAsync());
+        }
+
+        Directory.Delete(Path.Combine(_root, "Angel"), recursive: true);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal("Firefly", (await db.TvShows.SingleAsync()).Title);
+            Assert.Equal(1, await db.Seasons.CountAsync());   // Angel's season cascaded away
+            Assert.Equal(1, await db.Episodes.CountAsync());  // Angel's episode cascaded away
+        }
+    }
+
+    [Fact]
+    public async Task Scan_refuses_to_prune_when_nothing_is_found_on_disk()
+    {
+        // Guards the catastrophic case: the library root resolves but is empty (e.g. a network share
+        // mounted to a bare mount point). The records must survive and the scan must fail loudly.
+        var dir = Path.Combine(_root, "Inception (2010)");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "Inception (2010).mkv"), "x");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.Movies);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        Directory.Delete(dir, recursive: true); // root still exists, but now has no media
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None));
+
+        await using var db = _factory.CreateDbContext();
+        Assert.Equal(1, await db.Movies.CountAsync()); // not pruned
+    }
+
     private async Task<Guid> SeedLibraryAsync(LibraryType type)
     {
         var id = Guid.NewGuid();

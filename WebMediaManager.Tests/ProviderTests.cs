@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using WebMediaManager.Core.Domain;
 using WebMediaManager.Core.Providers;
 using WebMediaManager.Core.Settings;
+using WebMediaManager.Providers.Imdb;
 using WebMediaManager.Providers.Tmdb;
 using WebMediaManager.Providers.Tvdb;
 using WebMediaManager.Services;
@@ -110,6 +111,100 @@ public class ProviderTests
         Assert.Equal(2008, r.Year);
         Assert.Equal("81189", r.ProviderId);
         Assert.Equal(MetadataSource.Tvdb, r.Source);
+    }
+
+    [Fact]
+    public async Task Imdb_movie_search_parses_results_and_sends_api_key()
+    {
+        Uri? sentUri = null;
+        var provider = NewImdb(new StubHandler(req =>
+        {
+            sentUri = req.RequestUri;
+            return (HttpStatusCode.OK,
+                """{"Search":[{"Title":"Inception","Year":"2010","imdbID":"tt1375666","Type":"movie","Poster":"http://img/p.jpg"}],"totalResults":"1","Response":"True"}""");
+        }));
+
+        var results = await provider.SearchAsync("Inception", 2010, LibraryType.Movies, default);
+
+        var r = Assert.Single(results);
+        Assert.Equal("Inception", r.Title);
+        Assert.Equal(2010, r.Year);
+        Assert.Equal("tt1375666", r.ProviderId);
+        Assert.Equal(MetadataSource.Imdb, r.Source);
+        Assert.Equal("http://img/p.jpg", r.PosterUrl);
+        Assert.Contains("apikey=KEY", sentUri!.Query);
+        Assert.Contains("type=movie", sentUri.Query);
+        Assert.Contains("y=2010", sentUri.Query);
+    }
+
+    [Fact]
+    public async Task Imdb_movie_details_parses_metadata()
+    {
+        var provider = NewImdb(new StubHandler(_ => (HttpStatusCode.OK,
+            """
+            {"Title":"Inception","Year":"2010","Released":"16 Jul 2010","Runtime":"148 min",
+             "Genre":"Action, Adventure, Sci-Fi","Plot":"A thief","Production":"Legendary",
+             "Poster":"http://img/p.jpg","imdbRating":"8.8","imdbVotes":"2,300,000",
+             "imdbID":"tt1375666","Type":"movie","Response":"True"}
+            """)));
+
+        var movie = await provider.GetMovieAsync("tt1375666", default);
+
+        Assert.NotNull(movie);
+        Assert.Equal("Inception", movie!.Title);
+        Assert.Equal(2010, movie.Year);
+        Assert.Equal(new DateOnly(2010, 7, 16), movie.ReleaseDate);
+        Assert.Equal(148, movie.Runtime);
+        Assert.Equal(8.8, movie.Rating);
+        Assert.Equal(2300000, movie.Votes);
+        Assert.Equal("tt1375666", movie.ImdbId);
+        Assert.Equal(["Action", "Adventure", "Sci-Fi"], movie.Genres);
+        Assert.Equal(["Legendary"], movie.Studios);
+    }
+
+    [Fact]
+    public async Task Imdb_handles_not_found_response()
+    {
+        // OMDb returns HTTP 200 with Response:"False" when a title is missing.
+        var provider = NewImdb(new StubHandler(_ => (HttpStatusCode.OK,
+            """{"Response":"False","Error":"Incorrect IMDb ID."}""")));
+
+        var movie = await provider.GetMovieAsync("tt0000000", default);
+
+        Assert.Null(movie);
+    }
+
+    [Fact]
+    public async Task Imdb_series_status_derived_from_year_range()
+    {
+        var ended = NewImdb(new StubHandler(_ => (HttpStatusCode.OK,
+            """{"Title":"Breaking Bad","Year":"2008–2013","imdbID":"tt0903747","Type":"series","Response":"True"}""")));
+        var running = NewImdb(new StubHandler(_ => (HttpStatusCode.OK,
+            """{"Title":"The Show","Year":"2021–","imdbID":"tt9999999","Type":"series","Response":"True"}""")));
+
+        Assert.Equal(TvShowStatus.Ended, (await ended.GetTvShowAsync("tt0903747", default))!.Status);
+        Assert.Equal(TvShowStatus.Continuing, (await running.GetTvShowAsync("tt9999999", default))!.Status);
+    }
+
+    [Fact]
+    public async Task Imdb_unauthorized_throws_metadata_exception()
+    {
+        var provider = NewImdb(new StubHandler(_ => (HttpStatusCode.Unauthorized, """{"Response":"False","Error":"Invalid API key!"}""")));
+        await Assert.ThrowsAsync<MetadataException>(() => provider.SearchAsync("x", null, LibraryType.Movies, default));
+    }
+
+    [Fact]
+    public async Task Imdb_missing_key_throws_metadata_exception()
+    {
+        var provider = NewImdb(new StubHandler(_ => (HttpStatusCode.OK, "{}")), key: null);
+        await Assert.ThrowsAsync<MetadataException>(() => provider.SearchAsync("x", null, LibraryType.Movies, default));
+    }
+
+    private static ImdbMetadataProvider NewImdb(StubHandler handler, string? key = "KEY")
+    {
+        var http = new HttpClient(handler) { BaseAddress = new Uri("https://www.omdbapi.com/") };
+        var settings = SettingsWith(s => s.Providers.OmdbApiKey = key);
+        return new ImdbMetadataProvider(http, new StubSettings(settings));
     }
 
     private static TmdbMetadataProvider NewTmdb(StubHandler handler, string? key = "KEY")

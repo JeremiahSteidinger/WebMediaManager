@@ -23,21 +23,24 @@ public sealed class RenameService(
     ITokenEngine engine,
     IFileSystem fs,
     RenamePlanner planner,
+    IActivityLogService activityLog,
     ILogger<RenameService> logger) : IRenameService
 {
     public async Task<RenamePlan> BuildPlanAsync(Guid itemId, CancellationToken ct = default)
     {
-        var (root, computed) = await ComputeAsync(itemId, ct);
+        var (root, computed, _) = await ComputeAsync(itemId, ct);
         return planner.BuildPlan(root, computed.Moves, fs);
     }
 
     public async Task<RenameResult> ApplyAsync(Guid itemId, CancellationToken ct = default)
     {
-        var (root, computed) = await ComputeAsync(itemId, ct);
+        var (root, computed, subject) = await ComputeAsync(itemId, ct);
         var plan = planner.BuildPlan(root, computed.Moves, fs);
 
         if (plan.HasConflicts)
         {
+            await activityLog.LogAsync(ActivityCategory.Rename, ActivityStatus.Warning, subject,
+                "Rename skipped — one or more targets conflict", itemId, ct);
             return new RenameResult(false, 0, "The plan has conflicts; resolve them before renaming.");
         }
         if (plan.IsEmpty)
@@ -64,16 +67,20 @@ public sealed class RenameService(
             catch (Exception ex)
             {
                 logger.LogError(ex, "Rename op failed: {From} -> {To}", op.FromAbsolute, op.ToAbsolute);
+                await activityLog.LogAsync(ActivityCategory.Rename, ActivityStatus.Failure, subject,
+                    $"Renamed {applied} of {plan.Ops.Count} path(s), then failed on '{op.FromRelative}': {ex.Message}", itemId, ct);
                 return new RenameResult(false, applied,
                     $"Renamed {applied} item(s), then failed on '{op.FromRelative}': {ex.Message}. Re-scan the library to resync.");
             }
         }
 
         await PersistAsync(itemId, computed, ct);
+        await activityLog.LogAsync(ActivityCategory.Rename, ActivityStatus.Success, subject,
+            $"Renamed {applied} path(s)", itemId, ct);
         return new RenameResult(true, applied, null);
     }
 
-    private async Task<(string Root, ComputedRename Computed)> ComputeAsync(Guid itemId, CancellationToken ct)
+    private async Task<(string Root, ComputedRename Computed, string Subject)> ComputeAsync(Guid itemId, CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         var patterns = (await settings.GetAsync(ct)).RenamePatterns;
@@ -82,7 +89,7 @@ public sealed class RenameService(
         if (movie is not null)
         {
             var library = await RequireLibrary(db, movie.LibraryId, ct);
-            return (library.RootPath, ComputeMovie(movie, library.RootPath, patterns));
+            return (library.RootPath, ComputeMovie(movie, library.RootPath, patterns), movie.Title);
         }
 
         var show = await db.TvShows
@@ -91,7 +98,7 @@ public sealed class RenameService(
         if (show is not null)
         {
             var library = await RequireLibrary(db, show.LibraryId, ct);
-            return (library.RootPath, ComputeShow(show, library.RootPath, patterns));
+            return (library.RootPath, ComputeShow(show, library.RootPath, patterns), show.Title);
         }
 
         throw new InvalidOperationException("Item not found.");

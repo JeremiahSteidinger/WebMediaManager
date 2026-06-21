@@ -25,6 +25,8 @@ public sealed class IdentifyService(
     ISettingsService settings,
     IArtworkService artwork,
     INfoFileService nfo,
+    IRenameService rename,
+    IActivityLogService activityLog,
     ILogger<IdentifyService> logger) : IIdentifyService
 {
     public async Task<IReadOnlyList<MetadataSearchResult>> SearchAsync(
@@ -57,58 +59,106 @@ public sealed class IdentifyService(
 
     public async Task LinkAsync(Guid itemId, MetadataSearchResult result, CancellationToken ct = default)
     {
-        var provider = resolver.Get(result.Source)
-            ?? throw new MetadataException($"Provider {result.Source} is not available.");
-
-        await using var db = await factory.CreateDbContextAsync(ct);
-        var item = await db.MediaItems.FirstOrDefaultAsync(m => m.Id == itemId, ct)
-            ?? throw new InvalidOperationException("Item not found.");
-
-        string? posterUrl = null;
-        string? fanartUrl = null;
-        switch (item)
+        // Falls back to a generic subject if we fail before the item is loaded; refined to the title otherwise.
+        var subject = "item";
+        try
         {
-            case Movie movie:
-                var movieMeta = await provider.GetMovieAsync(result.ProviderId, ct)
-                    ?? throw new MetadataException("No movie details returned by the provider.");
-                ApplyMovie(movie, movieMeta);
-                posterUrl = movieMeta.PosterUrl;
-                fanartUrl = movieMeta.FanartUrl;
-                break;
+            var provider = resolver.Get(result.Source)
+                ?? throw new MetadataException($"Provider {result.Source} is not available.");
 
-            case TvShow show:
-                var showMeta = await provider.GetTvShowAsync(result.ProviderId, ct)
-                    ?? throw new MetadataException("No show details returned by the provider.");
-                ApplyShow(show, showMeta);
-                posterUrl = showMeta.PosterUrl;
-                fanartUrl = showMeta.FanartUrl;
-                await EnrichEpisodesAsync(db, show, provider, result.ProviderId, ct);
-                break;
+            await using var db = await factory.CreateDbContextAsync(ct);
+            var item = await db.MediaItems.FirstOrDefaultAsync(m => m.Id == itemId, ct)
+                ?? throw new InvalidOperationException("Item not found.");
+            subject = item.Title;
+
+            string? posterUrl = null;
+            string? fanartUrl = null;
+            switch (item)
+            {
+                case Movie movie:
+                    var movieMeta = await provider.GetMovieAsync(result.ProviderId, ct)
+                        ?? throw new MetadataException("No movie details returned by the provider.");
+                    ApplyMovie(movie, movieMeta);
+                    posterUrl = movieMeta.PosterUrl;
+                    fanartUrl = movieMeta.FanartUrl;
+                    break;
+
+                case TvShow show:
+                    var showMeta = await provider.GetTvShowAsync(result.ProviderId, ct)
+                        ?? throw new MetadataException("No show details returned by the provider.");
+                    ApplyShow(show, showMeta);
+                    posterUrl = showMeta.PosterUrl;
+                    fanartUrl = showMeta.FanartUrl;
+                    await EnrichEpisodesAsync(db, show, provider, result.ProviderId, ct);
+                    break;
+            }
+
+            item.PrimaryProvider = result.Source;
+            item.MatchState = MatchState.Matched;
+            subject = item.Title;
+
+            await RefreshArtworkRowsAsync(db, itemId, posterUrl, fanartUrl, ct);
+            await db.SaveChangesAsync(ct);
+
+            await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Success, subject,
+                $"Matched to {result.Source} #{result.ProviderId}", itemId, ct);
         }
-
-        item.PrimaryProvider = result.Source;
-        item.MatchState = MatchState.Matched;
-
-        await RefreshArtworkRowsAsync(db, itemId, posterUrl, fanartUrl, ct);
-        await db.SaveChangesAsync(ct);
+        catch (Exception ex)
+        {
+            await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Failure, subject,
+                $"Identify failed: {ex.Message}", itemId, ct);
+            throw;
+        }
 
         // Side effects below are best-effort: a failure must never undo the match.
         try
         {
-            await artwork.DownloadForItemAsync(itemId, ct);
+            var images = await artwork.DownloadForItemAsync(itemId, ct);
+            if (images > 0)
+            {
+                await activityLog.LogAsync(ActivityCategory.Artwork, ActivityStatus.Success, subject,
+                    $"Downloaded {images} image(s)", itemId, ct);
+            }
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Artwork download failed for item {ItemId}", itemId);
+            await activityLog.LogAsync(ActivityCategory.Artwork, ActivityStatus.Failure, subject,
+                $"Artwork download failed: {ex.Message}", itemId, ct);
         }
 
         try
         {
-            await nfo.WriteForItemAsync(itemId, ct);
+            var files = await nfo.WriteForItemAsync(itemId, ct);
+            if (files > 0)
+            {
+                await activityLog.LogAsync(ActivityCategory.Nfo, ActivityStatus.Success, subject,
+                    $"Wrote {files} NFO file(s)", itemId, ct);
+            }
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "NFO write failed for item {ItemId}", itemId);
+            await activityLog.LogAsync(ActivityCategory.Nfo, ActivityStatus.Failure, subject,
+                $"NFO write failed: {ex.Message}", itemId, ct);
+        }
+
+        // Auto-rename runs last so the NFO/artwork written above are carried along by the folder move.
+        // RenameService records its own outcome to the activity log.
+        try
+        {
+            if ((await settings.GetAsync(ct)).RenamePatterns.AutoRenameAfterMatch)
+            {
+                var renameResult = await rename.ApplyAsync(itemId, ct);
+                if (!renameResult.Success)
+                {
+                    logger.LogWarning("Auto-rename skipped for item {ItemId}: {Error}", itemId, renameResult.Error);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Auto-rename failed for item {ItemId}", itemId);
         }
     }
 

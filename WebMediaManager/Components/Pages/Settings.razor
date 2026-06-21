@@ -36,10 +36,27 @@ else
                     <input class="@InputClass font-mono" @bind="settings.Providers.TvdbPin" @bind:after="ResetSaved" />
                 </div>
                 <div>
+                    <label class="@LabelClass">OMDb API key</label>
+                    <input class="@InputClass font-mono" @bind="settings.Providers.OmdbApiKey" @bind:after="ResetSaved" />
+                    <p class="mt-1 text-xs text-slate-500">
+                        Powers the IMDb source. IMDb has no public API; OMDb (<a class="text-sky-400 hover:text-sky-300"
+                        href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener">omdbapi.com</a>)
+                        serves its data with a free key.
+                    </p>
+                </div>
+                <div>
+                    <label class="@LabelClass">Preferred movie source</label>
+                    <select class="@InputClass" @bind="settings.Providers.PreferredMovieSource" @bind:after="ResetSaved">
+                        <option value="@MetadataSource.Tmdb">TMDB</option>
+                        <option value="@MetadataSource.Imdb">IMDb</option>
+                    </select>
+                </div>
+                <div>
                     <label class="@LabelClass">Preferred TV source</label>
                     <select class="@InputClass" @bind="settings.Providers.PreferredTvSource" @bind:after="ResetSaved">
                         <option value="@MetadataSource.Tmdb">TMDB</option>
                         <option value="@MetadataSource.Tvdb">TVDB</option>
+                        <option value="@MetadataSource.Imdb">IMDb</option>
                     </select>
                 </div>
             </div>
@@ -47,6 +64,16 @@ else
         else if (activeTab == "Rename patterns")
         {
             <div class="space-y-5">
+                <div>
+                    <label class="@CheckLabelClass">
+                        <input type="checkbox" class="@CheckClass" @bind="settings.RenamePatterns.AutoRenameAfterMatch" @bind:after="ResetSaved" />
+                        Automatically rename after a successful match
+                    </label>
+                    <p class="mt-1 text-xs text-slate-500">
+                        When on, identifying an item also applies these patterns to disk. A rename whose targets
+                        conflict is skipped — handle those with the manual Rename button.
+                    </p>
+                </div>
                 <div class="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
                     <div class="mb-2 text-xs text-slate-400">Drag a token into any field below (or type it):</div>
                     <div class="flex flex-wrap gap-1.5">

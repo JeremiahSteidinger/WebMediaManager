@@ -10,13 +10,13 @@
                     <option value="@s">@Label(s)</option>
                 }
             </select>
-            <select class="rounded border border-slate-700 bg-slate-800 px-2 py-2 text-sm text-white" @bind="byId">
-                <option value="false">By title</option>
-                <option value="true">By ID</option>
+            <select class="rounded border border-slate-700 bg-slate-800 px-2 py-2 text-sm text-white" @bind="searchMode">
+                <option value="title">By title</option>
+                <option value="id">By ID</option>
             </select>
             <input class="min-w-0 flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white"
                    @bind="query" @bind:event="oninput" @onkeydown="OnKeyDown"
-                   placeholder="@(byId ? $"{Label(source)} id, e.g. 27205" : "Search title…")" />
+                   placeholder="@(byId ? $"{Label(source)} id, e.g. {IdExample(source)}" : "Search title…")" />
             <button class="rounded bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
                     @onclick="Search" disabled="@busy">
                 @(byId ? "Look up" : "Search")
@@ -82,7 +82,8 @@
 
     private List<MetadataSource> availableSources = [];
     private MetadataSource source = MetadataSource.Tmdb;
-    private bool byId;
+    private string searchMode = "title";
+    private bool byId => searchMode == "id";
     private string query = string.Empty;
     private List<MetadataSearchResult>? results;
     private bool busy;
@@ -173,6 +174,13 @@
     {
         MetadataSource.Tmdb => "TMDB",
         MetadataSource.Tvdb => "TVDB",
+        MetadataSource.Imdb => "IMDb",
         _ => s.ToString(),
+    };
+
+    private static string IdExample(MetadataSource s) => s switch
+    {
+        MetadataSource.Imdb => "tt1375666",
+        _ => "27205",
     };
 }

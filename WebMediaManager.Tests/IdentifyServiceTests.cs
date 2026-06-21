@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using WebMediaManager.Core.Domain;
 using WebMediaManager.Core.Providers;
+using WebMediaManager.Core.Renaming;
 using WebMediaManager.Core.Settings;
 using WebMediaManager.Data;
 using WebMediaManager.Providers;
@@ -58,7 +59,7 @@ public sealed class IdentifyServiceTests : IDisposable
         };
         var service = new IdentifyService(
             new FakeResolver(new FakeProvider(meta)), _factory, new StubSettings(), new NoopArtwork(),
-            new NoopNfo(), NullLogger<IdentifyService>.Instance);
+            new NoopNfo(), new NoopRename(), new NoopActivityLog(), NullLogger<IdentifyService>.Instance);
 
         await service.LinkAsync(movieId, new MetadataSearchResult(MetadataSource.Tmdb, "27205", "Inception", 2010, null, null));
 
@@ -79,7 +80,7 @@ public sealed class IdentifyServiceTests : IDisposable
         var meta = new MovieMetadata { ProviderId = "27205", Title = "Inception", Year = 2010, PosterUrl = "http://img/p.jpg" };
         var service = new IdentifyService(
             new FakeResolver(new FakeProvider(meta)), _factory, new StubSettings(), new NoopArtwork(),
-            new NoopNfo(), NullLogger<IdentifyService>.Instance);
+            new NoopNfo(), new NoopRename(), new NoopActivityLog(), NullLogger<IdentifyService>.Instance);
 
         var hit = await service.LookupByIdAsync(MetadataSource.Tmdb, "27205", LibraryType.Movies);
 
@@ -107,12 +108,20 @@ public sealed class IdentifyServiceTests : IDisposable
 
     private sealed class NoopArtwork : IArtworkService
     {
-        public Task DownloadForItemAsync(Guid itemId, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<int> DownloadForItemAsync(Guid itemId, CancellationToken ct = default) => Task.FromResult(0);
     }
 
     private sealed class NoopNfo : INfoFileService
     {
-        public Task WriteForItemAsync(Guid itemId, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<int> WriteForItemAsync(Guid itemId, CancellationToken ct = default) => Task.FromResult(0);
+    }
+
+    private sealed class NoopRename : IRenameService
+    {
+        public Task<RenamePlan> BuildPlanAsync(Guid itemId, CancellationToken ct = default) =>
+            Task.FromResult(new RenamePlan([]));
+        public Task<RenameResult> ApplyAsync(Guid itemId, CancellationToken ct = default) =>
+            Task.FromResult(new RenameResult(true, 0, null));
     }
 
     private sealed class FakeResolver(IMetadataProvider provider) : IMetadataProviderResolver
