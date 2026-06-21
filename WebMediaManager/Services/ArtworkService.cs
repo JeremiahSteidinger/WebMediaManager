@@ -6,8 +6,9 @@ namespace WebMediaManager.Services;
 
 public interface IArtworkService
 {
-    /// <summary>Downloads any not-yet-fetched artwork for an item to disk next to the media. Best-effort.</summary>
-    Task DownloadForItemAsync(Guid itemId, CancellationToken ct = default);
+    /// <summary>Downloads any not-yet-fetched artwork for an item to disk next to the media. Best-effort.
+    /// Returns the number of images successfully written this call.</summary>
+    Task<int> DownloadForItemAsync(Guid itemId, CancellationToken ct = default);
 }
 
 public sealed class ArtworkService(
@@ -16,20 +17,20 @@ public sealed class ArtworkService(
     ISettingsService settings,
     ILogger<ArtworkService> logger) : IArtworkService
 {
-    public async Task DownloadForItemAsync(Guid itemId, CancellationToken ct = default)
+    public async Task<int> DownloadForItemAsync(Guid itemId, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
         var item = await db.MediaItems.FirstOrDefaultAsync(m => m.Id == itemId, ct);
         if (item is null)
         {
-            return;
+            return 0;
         }
 
         var library = await db.Libraries.FirstOrDefaultAsync(l => l.Id == item.LibraryId, ct);
         if (library is null)
         {
-            return;
+            return 0;
         }
 
         var pending = await db.Artworks
@@ -37,7 +38,7 @@ public sealed class ArtworkService(
             .ToListAsync(ct);
         if (pending.Count == 0)
         {
-            return;
+            return 0;
         }
 
         var cfg = (await settings.GetAsync(ct)).Artwork;
@@ -50,9 +51,10 @@ public sealed class ArtworkService(
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Cannot create artwork directory {Dir}", targetDir);
-            return;
+            return 0;
         }
 
+        var downloaded = 0;
         foreach (var art in pending)
         {
             ct.ThrowIfCancellationRequested();
@@ -70,6 +72,7 @@ public sealed class ArtworkService(
                 await File.WriteAllBytesAsync(fullPath, bytes, ct);
                 art.LocalRelativePath = Path.GetRelativePath(library.RootPath, fullPath);
                 art.DownloadedUtc = DateTimeOffset.UtcNow;
+                downloaded++;
             }
             catch (Exception ex)
             {
@@ -78,6 +81,7 @@ public sealed class ArtworkService(
         }
 
         await db.SaveChangesAsync(ct);
+        return downloaded;
     }
 
     /// <summary>Returns the on-disk directory for an item — its folder, or the parent of a loose file.</summary>

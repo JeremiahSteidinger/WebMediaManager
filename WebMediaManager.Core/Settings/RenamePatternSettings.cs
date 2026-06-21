@@ -15,4 +15,10 @@ public class RenamePatternSettings
     public string SeasonFolder { get; set; } = "Season {seasonNr2}";
 
     public string EpisodeFile { get; set; } = "{showtitle} - S{seasonNr2}E{episodeNr2} - {title}";
+
+    /// <summary>
+    /// When true, identifying an item also applies these patterns to disk as a best-effort step.
+    /// A rename whose plan has conflicts is skipped (resolve those via the manual Rename button).
+    /// </summary>
+    public bool AutoRenameAfterMatch { get; set; }
 }

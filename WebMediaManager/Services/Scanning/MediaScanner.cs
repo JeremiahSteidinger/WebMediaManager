@@ -13,6 +13,8 @@ namespace WebMediaManager.Services.Scanning;
 /// Folder-convention scanner. Movies: one folder per movie (largest video is the main file) plus loose
 /// videos in the root. TV: one folder per show, episodes discovered recursively and grouped by season.
 /// New items are written as <see cref="MatchState.Unmatched"/>; existing paths are skipped (re-scan safe).
+/// Items whose folder/file no longer exists on disk are pruned, so a folder renamed or removed out-of-band
+/// (e.g. by another instance sharing the library) doesn't leave a record pointing at a path that's gone.
 /// </summary>
 public sealed class MediaScanner(
     IDbContextFactory<MediaDbContext> factory,
@@ -37,18 +39,28 @@ public sealed class MediaScanner(
             throw new DirectoryNotFoundException($"Library root not found: {library.RootPath}");
         }
 
-        var (added, skipped) = library.Type == LibraryType.Movies
+        var (added, skipped, removed) = library.Type == LibraryType.Movies
             ? await ScanMoviesAsync(db, library, reimport, ct)
             : await ScanTvAsync(db, library, reimport, ct);
 
-        var note = skipped > 0 ? $"{skipped} folder(s) skipped — see logs" : null;
+        var parts = new List<string>();
+        if (removed > 0)
+        {
+            parts.Add($"{removed} removed (no longer on disk)");
+        }
+        if (skipped > 0)
+        {
+            parts.Add($"{skipped} folder(s) skipped — see logs");
+        }
+        var note = parts.Count > 0 ? string.Join("; ", parts) : null;
         progress.Set(new ScanProgress(libraryId, ScanState.Completed, added, note, null));
     }
 
-    private async Task<(int Added, int Skipped)> ScanMoviesAsync(MediaDbContext db, Library library, bool reimport, CancellationToken ct)
+    private async Task<(int Added, int Skipped, int Removed)> ScanMoviesAsync(MediaDbContext db, Library library, bool reimport, CancellationToken ct)
     {
         var added = 0;
         var skipped = 0;
+        var foundOnDisk = 0;
 
         // Reimport loads existing movies tracked so we can re-read NFO/artwork into them in place.
         Dictionary<string, Movie>? existing = null;
@@ -83,6 +95,7 @@ public sealed class MediaScanner(
                     continue;
                 }
 
+                foundOnDisk++;
                 var rel = Path.GetRelativePath(library.RootPath, dir);
                 var main = videos.MaxBy(f => new FileInfo(f).Length)!;
 
@@ -122,6 +135,7 @@ public sealed class MediaScanner(
                     continue;
                 }
 
+                foundOnDisk++;
                 var rel = Path.GetRelativePath(library.RootPath, file);
                 var fileName = Path.GetFileName(file);
 
@@ -150,13 +164,15 @@ public sealed class MediaScanner(
         }
 
         await db.SaveChangesAsync(ct);
-        return (added, skipped);
+        var removed = await PruneMissingAsync(db, db.Movies, library, foundOnDisk, ct);
+        return (added, skipped, removed);
     }
 
-    private async Task<(int Added, int Skipped)> ScanTvAsync(MediaDbContext db, Library library, bool reimport, CancellationToken ct)
+    private async Task<(int Added, int Skipped, int Removed)> ScanTvAsync(MediaDbContext db, Library library, bool reimport, CancellationToken ct)
     {
         var added = 0;
         var skipped = 0;
+        var foundOnDisk = 0;
 
         Dictionary<string, TvShow>? existing = null;
         HashSet<string> seen;
@@ -188,6 +204,7 @@ public sealed class MediaScanner(
             var rel = Path.GetRelativePath(library.RootPath, showDir);
             if (!seen.Add(rel))
             {
+                foundOnDisk++; // the show folder is present on disk
                 // Already in the DB: only reimport re-reads tvshow.nfo, show artwork, and episode NFOs.
                 if (reimport && existing!.TryGetValue(rel, out var existingShow))
                 {
@@ -215,6 +232,7 @@ public sealed class MediaScanner(
                 continue;
             }
 
+            foundOnDisk++;
             var parsed = MediaNameParser.ParseMovie(showName);
             var now = DateTimeOffset.UtcNow;
             var show = new TvShow
@@ -282,7 +300,49 @@ public sealed class MediaScanner(
             }
         }
 
-        return (added, skipped);
+        var removed = await PruneMissingAsync(db, db.TvShows, library, foundOnDisk, ct);
+        return (added, skipped, removed);
+    }
+
+    /// <summary>
+    /// Removes items whose folder/file is no longer on disk. Cascades clear their artwork/seasons/episodes.
+    /// Guarded twice against wiping a library on a disappeared volume: the root is verified to exist before any
+    /// scan runs (a missing root throws), and here a scan that turned up nothing on disk while items are on
+    /// record is treated as the volume being offline (e.g. an empty mount point) — it throws instead of pruning.
+    /// </summary>
+    private async Task<int> PruneMissingAsync<T>(MediaDbContext db, DbSet<T> set, Library library, int foundOnDisk, CancellationToken ct)
+        where T : MediaItem
+    {
+        var items = await set.Where(m => m.LibraryId == library.Id).ToListAsync(ct);
+
+        if (foundOnDisk == 0 && items.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Scan found no media under '{library.RootPath}' but {items.Count} item(s) are on record. " +
+                "Refusing to prune — the library volume may be offline or unmounted.");
+        }
+
+        var removed = 0;
+        foreach (var item in items)
+        {
+            ct.ThrowIfCancellationRequested();
+            var full = Path.Combine(library.RootPath, item.RelativePath);
+            if (Directory.Exists(full) || File.Exists(full))
+            {
+                continue;
+            }
+
+            set.Remove(item);
+            removed++;
+            logger.LogInformation("Removing {Type} no longer on disk: {Path}", typeof(T).Name, item.RelativePath);
+        }
+
+        if (removed > 0)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        return removed;
     }
 
     private static Movie AddMovie(MediaDbContext db, Library library, string name, string rel, string videoRel)

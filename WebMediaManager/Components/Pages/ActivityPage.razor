@@ -1,0 +1,136 @@
+@page "/activity"
+@inject IActivityLogService ActivityLog
+
+<PageTitle>Activity</PageTitle>
+
+<div class="flex items-center justify-between">
+    <h1 class="text-2xl font-bold text-white">Activity</h1>
+    @if (entries is { Count: > 0 })
+    {
+        <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                @onclick="() => showClear = true">
+            Clear log
+        </button>
+    }
+</div>
+
+<div class="mt-6 flex gap-1 border-b border-slate-800 text-sm">
+    @foreach (var f in Filters)
+    {
+        <button class="@FilterClass(f.Status)" @onclick="() => SelectFilter(f.Status)">@f.Label</button>
+    }
+</div>
+
+@if (entries is null)
+{
+    <p class="mt-6 text-slate-400">Loading…</p>
+}
+else if (entries.Count == 0)
+{
+    <div class="mt-10 rounded-lg border border-dashed border-slate-700 p-10 text-center">
+        <p class="text-slate-400">@(filter is null ? "No activity recorded yet." : "No matching activity.")</p>
+    </div>
+}
+else
+{
+    <div class="mt-6 overflow-hidden rounded-lg border border-slate-800">
+        <table class="w-full text-left text-sm">
+            <thead class="bg-slate-900/60 text-slate-400">
+                <tr>
+                    <th class="px-4 py-3 font-medium">Time</th>
+                    <th class="px-4 py-3 font-medium">Action</th>
+                    <th class="px-4 py-3 font-medium">Status</th>
+                    <th class="px-4 py-3 font-medium">Item</th>
+                    <th class="px-4 py-3 font-medium">Details</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800">
+                @foreach (var e in entries)
+                {
+                    <tr class="hover:bg-slate-900/40">
+                        <td class="px-4 py-3 whitespace-nowrap text-slate-400">@e.TimestampUtc.ToLocalTime().ToString("MMM d, HH:mm:ss")</td>
+                        <td class="px-4 py-3 text-slate-300">@CategoryLabel(e.Category)</td>
+                        <td class="px-4 py-3"><span class="@BadgeClass(e.Status)">@e.Status</span></td>
+                        <td class="px-4 py-3">
+                            @if (e.ItemId is { } id)
+                            {
+                                <a class="text-sky-400 hover:text-sky-300" href="@($"item/{id}")">@e.Subject</a>
+                            }
+                            else
+                            {
+                                <span class="text-slate-300">@e.Subject</span>
+                            }
+                        </td>
+                        <td class="px-4 py-3 text-slate-400">@e.Message</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <p class="mt-3 text-xs text-slate-500">Showing the @entries.Count most recent action(s).</p>
+}
+
+<Modal Visible="showClear" Title="Clear activity log" OnClose="() => showClear = false">
+    <p class="text-sm text-slate-300">Remove all recorded activity entries? This can't be undone.</p>
+    <div class="mt-6 flex justify-end gap-2">
+        <button class="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                @onclick="() => showClear = false">
+            Cancel
+        </button>
+        <button class="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
+                @onclick="ConfirmClear">
+            Clear
+        </button>
+    </div>
+</Modal>
+
+@code {
+    private const int MaxRows = 200;
+
+    private IReadOnlyList<ActivityLog>? entries;
+    private ActivityStatus? filter;
+    private bool showClear;
+
+    private static readonly (string Label, ActivityStatus? Status)[] Filters =
+    [
+        ("All", null),
+        ("Success", ActivityStatus.Success),
+        ("Warning", ActivityStatus.Warning),
+        ("Failure", ActivityStatus.Failure),
+    ];
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load() => entries = await ActivityLog.GetRecentAsync(MaxRows, filter);
+
+    private async Task SelectFilter(ActivityStatus? status)
+    {
+        filter = status;
+        await Load();
+    }
+
+    private async Task ConfirmClear()
+    {
+        await ActivityLog.ClearAsync();
+        showClear = false;
+        filter = null;
+        await Load();
+    }
+
+    private static string CategoryLabel(ActivityCategory category) => category switch
+    {
+        ActivityCategory.Nfo => "NFO",
+        _ => category.ToString(),
+    };
+
+    private string FilterClass(ActivityStatus? status) => status == filter
+        ? "border-b-2 border-sky-500 px-3 py-2 font-medium text-white"
+        : "border-b-2 border-transparent px-3 py-2 text-slate-400 hover:text-white";
+
+    private static string BadgeClass(ActivityStatus status) => status switch
+    {
+        ActivityStatus.Success => "rounded px-2 py-0.5 text-xs font-medium bg-emerald-500/15 text-emerald-300",
+        ActivityStatus.Warning => "rounded px-2 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-300",
+        _ => "rounded px-2 py-0.5 text-xs font-medium bg-red-500/15 text-red-300",
+    };
+}

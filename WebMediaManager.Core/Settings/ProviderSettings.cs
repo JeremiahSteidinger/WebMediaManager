@@ -15,6 +15,9 @@ public class ProviderSettings
     /// <summary>Optional subscriber PIN required by licensed TVDB v4 keys.</summary>
     public string? TvdbPin { get; set; }
 
+    /// <summary>Key for the OMDb API (omdbapi.com), which serves IMDb metadata. IMDb has no public API.</summary>
+    public string? OmdbApiKey { get; set; }
+
     public MetadataSource PreferredMovieSource { get; set; } = MetadataSource.Tmdb;
 
     public MetadataSource PreferredTvSource { get; set; } = MetadataSource.Tmdb;

@@ -27,6 +27,8 @@ public class MediaDbContext(DbContextOptions<MediaDbContext> options) : DbContex
 
     public DbSet<Artwork> Artworks => Set<Artwork>();
 
+    public DbSet<ActivityLog> ActivityLogs => Set<ActivityLog>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(MediaDbContext).Assembly);
