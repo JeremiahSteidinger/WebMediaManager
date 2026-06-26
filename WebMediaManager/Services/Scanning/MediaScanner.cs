@@ -12,9 +12,11 @@ namespace WebMediaManager.Services.Scanning;
 /// <summary>
 /// Folder-convention scanner. Movies: one folder per movie (largest video is the main file) plus loose
 /// videos in the root. TV: one folder per show, episodes discovered recursively and grouped by season.
-/// New items are written as <see cref="MatchState.Unmatched"/>; existing paths are skipped (re-scan safe).
-/// Items whose folder/file no longer exists on disk are pruned, so a folder renamed or removed out-of-band
-/// (e.g. by another instance sharing the library) doesn't leave a record pointing at a path that's gone.
+/// New items are written as <see cref="MatchState.Unmatched"/>; existing items aren't duplicated, but an
+/// already-recorded show is reconciled with disk so episodes added since the last scan (e.g. a freshly
+/// downloaded episode of a season in progress) are picked up. Items whose folder/file no longer exists on
+/// disk are pruned, so a folder renamed or removed out-of-band (e.g. by another instance sharing the
+/// library) doesn't leave a record pointing at a path that's gone.
 /// </summary>
 public sealed class MediaScanner(
     IDbContextFactory<MediaDbContext> factory,
@@ -26,6 +28,10 @@ public sealed class MediaScanner(
     [
         "sample", "samples", "extras", "featurettes", "trailers", "behind the scenes", "deleted scenes",
     ];
+
+    // How often (in files) to publish a progress update while working through a single large show, so a
+    // show with hundreds of episodes shows steady movement instead of appearing frozen.
+    private const int ProgressInterval = 25;
 
     public async Task ScanAsync(Guid libraryId, bool reimport, CancellationToken ct)
     {
@@ -174,21 +180,14 @@ public sealed class MediaScanner(
         var skipped = 0;
         var foundOnDisk = 0;
 
-        Dictionary<string, TvShow>? existing = null;
-        HashSet<string> seen;
-        if (reimport)
-        {
-            var shows = await db.TvShows
-                .Include(s => s.Seasons).ThenInclude(se => se.Episodes)
-                .Where(s => s.LibraryId == library.Id).ToListAsync(ct);
-            existing = shows.ToDictionary(s => s.RelativePath, StringComparer.OrdinalIgnoreCase);
-            seen = new HashSet<string>(existing.Keys, StringComparer.OrdinalIgnoreCase);
-        }
-        else
-        {
-            seen = (await db.TvShows.Where(s => s.LibraryId == library.Id).Select(s => s.RelativePath).ToListAsync(ct))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
+        // Existing shows are loaded with their seasons/episodes so even a plain scan can reconcile a show
+        // already on record against disk and pull in newly added episodes. Reimport additionally re-reads
+        // sidecars/NFOs and refreshes artwork.
+        var shows = await db.TvShows
+            .Include(s => s.Seasons).ThenInclude(se => se.Episodes)
+            .Where(s => s.LibraryId == library.Id).ToListAsync(ct);
+        var existing = shows.ToDictionary(s => s.RelativePath, StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(existing.Keys, StringComparer.OrdinalIgnoreCase);
 
         foreach (var showDir in Directory.EnumerateDirectories(library.RootPath))
         {
@@ -205,25 +204,51 @@ public sealed class MediaScanner(
             if (!seen.Add(rel))
             {
                 foundOnDisk++; // the show folder is present on disk
-                // Already in the DB: only reimport re-reads tvshow.nfo, show artwork, and episode NFOs.
-                if (reimport && existing!.TryGetValue(rel, out var existingShow))
+                // Already in the DB. Every scan reconciles the show with disk, adding episodes that appeared
+                // since it was last scanned (a new download, or a season whose files were just renamed into a
+                // parseable form). Reimport additionally re-reads tvshow.nfo + show artwork and episode NFOs.
+                if (existing.TryGetValue(rel, out var existingShow))
                 {
-                    await ClearArtworkAsync(db, existingShow.Id, ct);
-                    ImportShowSidecars(db, library, existingShow, showDir);
-                    ReimportEpisodeNfos(library, existingShow);
-                    added++;
-                    Report(library.Id, added, showName);
+                    if (reimport)
+                    {
+                        Report(library.Id, added, $"{showName}: re-importing…");
+                        await ClearArtworkAsync(db, existingShow.Id, ct);
+                        ImportShowSidecars(db, library, existingShow, showDir);
+                    }
+
+                    var newEpisodes = AddMissingEpisodes(db, library, existingShow, showDir, added, ct);
+
+                    if (reimport)
+                    {
+                        ReimportEpisodeNfos(library, existingShow, added, ct);
+                    }
+
+                    // Count the show as touched (so the run's total reflects it) when a reimport ran or new
+                    // episodes were found; a plain re-scan that turned up nothing stays silent.
+                    if (reimport || newEpisodes > 0)
+                    {
+                        added++;
+                        Report(library.Id, added,
+                            newEpisodes > 0 ? $"{showName}: +{newEpisodes} new episode(s)" : showName);
+                    }
                 }
                 continue;
             }
 
+            Report(library.Id, added, $"{showName}: discovering episodes…");
             var episodes = new List<(string File, ParsedEpisode Info)>();
+            var discovered = 0;
             foreach (var file in EnumerateVideos(showDir))
             {
-                var info = MediaNameParser.ParseEpisode(Path.GetFileName(file));
+                ct.ThrowIfCancellationRequested();
+                var info = MediaNameParser.ParseEpisode(Path.GetFileName(file), SeasonFolderName(showDir, file));
                 if (info is not null)
                 {
                     episodes.Add((file, info));
+                }
+                if (++discovered % ProgressInterval == 0)
+                {
+                    Report(library.Id, added, $"{showName}: {episodes.Count} episode(s) found…");
                 }
             }
 
@@ -247,6 +272,8 @@ public sealed class MediaScanner(
                 DateScanned = now,
             };
 
+            var total = episodes.Count;
+            var processed = 0;
             foreach (var seasonGroup in episodes.GroupBy(e => e.Info.Season).OrderBy(g => g.Key))
             {
                 var season = new Season
@@ -258,6 +285,7 @@ public sealed class MediaScanner(
 
                 foreach (var (file, info) in seasonGroup.OrderBy(e => e.Info.Episodes[0]))
                 {
+                    ct.ThrowIfCancellationRequested();
                     var relFile = Path.GetRelativePath(library.RootPath, file);
                     // A multi-episode file (S01E01E02) yields one Episode row per number, sharing the file.
                     foreach (var episodeNumber in info.Episodes)
@@ -282,6 +310,11 @@ public sealed class MediaScanner(
                             }
                         }
                     }
+
+                    if (++processed % ProgressInterval == 0)
+                    {
+                        Report(library.Id, added, $"{showName}: imported {processed}/{total} episode(s)…");
+                    }
                 }
 
                 show.Seasons.Add(season);
@@ -300,6 +333,8 @@ public sealed class MediaScanner(
             }
         }
 
+        // New shows save per-iteration; this flushes reimport edits to existing shows (sidecars + episodes).
+        await db.SaveChangesAsync(ct);
         var removed = await PruneMissingAsync(db, db.TvShows, library, foundOnDisk, ct);
         return (added, skipped, removed);
     }
@@ -428,14 +463,95 @@ public sealed class MediaScanner(
         }
     }
 
-    private void ReimportEpisodeNfos(Library library, TvShow show)
+    /// <summary>
+    /// Reconciles an existing show's episodes with disk: any (season, episode) found on disk but not yet
+    /// recorded is added, creating its season if needed. Existing episodes are left untouched, so it never
+    /// duplicates. This is what lets a newly downloaded episode — or a whole season renamed into a parseable
+    /// form — be picked up on a scan without having to remove and re-add the show. Returns how many episode
+    /// rows were added.
+    /// </summary>
+    private int AddMissingEpisodes(MediaDbContext db, Library library, TvShow show, string showDir, int added, CancellationToken ct)
     {
-        foreach (var ep in show.Seasons.SelectMany(s => s.Episodes))
+        var have = show.Seasons
+            .SelectMany(s => s.Episodes.Select(e => (s.SeasonNumber, e.EpisodeNumber)))
+            .ToHashSet();
+
+        var addedEpisodes = 0;
+        var scanned = 0;
+        foreach (var file in EnumerateVideos(showDir))
         {
+            ct.ThrowIfCancellationRequested();
+            if (++scanned % ProgressInterval == 0)
+            {
+                Report(library.Id, added, $"{show.Title}: checking episodes ({scanned})…");
+            }
+
+            var info = MediaNameParser.ParseEpisode(Path.GetFileName(file), SeasonFolderName(showDir, file));
+            if (info is null)
+            {
+                continue;
+            }
+
+            var relFile = Path.GetRelativePath(library.RootPath, file);
+            foreach (var episodeNumber in info.Episodes)
+            {
+                if (!have.Add((info.Season, episodeNumber)))
+                {
+                    continue; // already recorded
+                }
+
+                var season = show.Seasons.FirstOrDefault(s => s.SeasonNumber == info.Season);
+                if (season is null)
+                {
+                    season = new Season { Id = Guid.NewGuid(), TvShowId = show.Id, SeasonNumber = info.Season };
+                    show.Seasons.Add(season);
+                    // Add explicitly: these carry app-assigned keys, so attaching only via the tracked show's
+                    // navigation would make EF mistake them for existing rows and emit UPDATEs, not INSERTs.
+                    db.Add(season);
+                }
+
+                var episode = new Episode
+                {
+                    Id = Guid.NewGuid(),
+                    SeasonId = season.Id,
+                    SeasonNumber = info.Season,
+                    EpisodeNumber = episodeNumber,
+                    VideoFilePath = relFile,
+                };
+                season.Episodes.Add(episode);
+                db.Add(episode);
+                addedEpisodes++;
+
+                if (info.Episodes.Count == 1)
+                {
+                    var epNfo = Path.ChangeExtension(file, ".nfo");
+                    if (File.Exists(epNfo) && TryLoadNfo(epNfo, out var epDoc))
+                    {
+                        nfoReader.ReadEpisode(epDoc, episode);
+                    }
+                }
+            }
+        }
+
+        return addedEpisodes;
+    }
+
+    private void ReimportEpisodeNfos(Library library, TvShow show, int added, CancellationToken ct)
+    {
+        var episodes = show.Seasons.SelectMany(s => s.Episodes).ToList();
+        var done = 0;
+        foreach (var ep in episodes)
+        {
+            ct.ThrowIfCancellationRequested();
             var epNfo = Path.ChangeExtension(Path.Combine(library.RootPath, ep.VideoFilePath), ".nfo");
             if (File.Exists(epNfo) && TryLoadNfo(epNfo, out var doc))
             {
                 nfoReader.ReadEpisode(doc, ep);
+            }
+
+            if (++done % ProgressInterval == 0)
+            {
+                Report(library.Id, added, $"{show.Title}: refreshing {done}/{episodes.Count} episode(s)…");
             }
         }
     }
@@ -490,6 +606,28 @@ public sealed class MediaScanner(
         }
     }
 
+    /// <summary>
+    /// Name of the nearest ancestor folder (between <paramref name="file"/> and <paramref name="showDir"/>)
+    /// that looks like a season folder — e.g. "Season 03" / "S3" — so the parser can supply the season for
+    /// episode files that don't carry it themselves ("01 - Title.mp4"). Null when no such folder exists.
+    /// </summary>
+    private static string? SeasonFolderName(string showDir, string file)
+    {
+        var showFull = Path.GetFullPath(showDir);
+        var dir = Path.GetDirectoryName(file);
+        while (dir is not null && !string.Equals(Path.GetFullPath(dir), showFull, StringComparison.OrdinalIgnoreCase))
+        {
+            var name = Path.GetFileName(dir);
+            if (MediaNameParser.ParseSeasonFolder(name) is not null)
+            {
+                return name;
+            }
+            dir = Path.GetDirectoryName(dir);
+        }
+        return null;
+    }
+
     private static bool IsIgnored(string folderName) =>
-        IgnoredFolders.Contains(folderName, StringComparer.OrdinalIgnoreCase);
+        folderName.StartsWith('.') // hidden/system folders (e.g. .git, .actors, @eaDir-style dotfiles)
+        || IgnoredFolders.Contains(folderName, StringComparer.OrdinalIgnoreCase);
 }

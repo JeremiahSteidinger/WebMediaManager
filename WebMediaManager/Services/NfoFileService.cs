@@ -11,6 +11,14 @@ public interface INfoFileService
     /// <summary>Writes NFO sidecars for an item per the NFO settings. Best-effort.
     /// Returns the number of NFO files successfully written this call.</summary>
     Task<int> WriteForItemAsync(Guid itemId, CancellationToken ct = default);
+
+    /// <summary>Writes the episode NFO for every episode of a single season (subject to the
+    /// episode-NFO setting). Returns the number written. Best-effort.</summary>
+    Task<int> WriteForSeasonAsync(Guid seasonId, CancellationToken ct = default);
+
+    /// <summary>Writes the episode NFO for a single episode (subject to the episode-NFO setting).
+    /// Returns 1 if written, else 0. Best-effort.</summary>
+    Task<int> WriteForEpisodeAsync(Guid episodeId, CancellationToken ct = default);
 }
 
 public sealed class NfoFileService(
@@ -55,14 +63,66 @@ public sealed class NfoFileService(
         {
             foreach (var episode in show.Seasons.SelectMany(s => s.Episodes))
             {
-                var nfoRel = Path.ChangeExtension(episode.VideoFilePath, ".nfo");
-                if (Save(writer.BuildEpisodeNfo(show, episode), Path.Combine(showLibrary.RootPath, nfoRel)))
+                if (WriteEpisode(show, episode, showLibrary.RootPath))
                 {
                     written++;
                 }
             }
         }
         return written;
+    }
+
+    public async Task<int> WriteForSeasonAsync(Guid seasonId, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        if (!(await settings.GetAsync(ct)).Nfo.WriteEpisodeNfo)
+        {
+            return 0;
+        }
+
+        var season = await db.Seasons.Include(s => s.Episodes).FirstOrDefaultAsync(s => s.Id == seasonId, ct);
+        if (season is null)
+        {
+            return 0;
+        }
+
+        var show = await db.TvShows.FirstAsync(s => s.Id == season.TvShowId, ct);
+        var root = (await db.Libraries.FirstAsync(l => l.Id == show.LibraryId, ct)).RootPath;
+        var written = 0;
+        foreach (var episode in season.Episodes)
+        {
+            if (WriteEpisode(show, episode, root))
+            {
+                written++;
+            }
+        }
+        return written;
+    }
+
+    public async Task<int> WriteForEpisodeAsync(Guid episodeId, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+        if (!(await settings.GetAsync(ct)).Nfo.WriteEpisodeNfo)
+        {
+            return 0;
+        }
+
+        var episode = await db.Episodes.FirstOrDefaultAsync(e => e.Id == episodeId, ct);
+        if (episode is null)
+        {
+            return 0;
+        }
+
+        var season = await db.Seasons.FirstAsync(s => s.Id == episode.SeasonId, ct);
+        var show = await db.TvShows.FirstAsync(s => s.Id == season.TvShowId, ct);
+        var root = (await db.Libraries.FirstAsync(l => l.Id == show.LibraryId, ct)).RootPath;
+        return WriteEpisode(show, episode, root) ? 1 : 0;
+    }
+
+    private bool WriteEpisode(TvShow show, Episode episode, string root)
+    {
+        var nfoRel = Path.ChangeExtension(episode.VideoFilePath, ".nfo");
+        return Save(writer.BuildEpisodeNfo(show, episode), Path.Combine(root, nfoRel));
     }
 
     private bool WriteMovie(Movie movie, string root)

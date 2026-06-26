@@ -11,6 +11,16 @@ public sealed record MetadataSearchResult(
     string? Overview,
     string? PosterUrl);
 
+/// <summary>
+/// An alternate episode ordering a provider offers for a show (a TMDB "episode group" —
+/// e.g. aired order, DVD order, absolute order, or a show-specific one like "Fox Order").
+/// </summary>
+public sealed record EpisodeOrdering(
+    string Id,
+    string Name,
+    string? Description,
+    int EpisodeCount);
+
 /// <summary>Per-episode metadata, provider-neutral.</summary>
 public sealed record EpisodeMetadata(
     int Season,

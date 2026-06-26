@@ -47,6 +47,49 @@ internal sealed class TmdbEpisode
     [JsonPropertyName("air_date")] public string? AirDate { get; set; }
 }
 
+// tv/{id}/episode_groups — the list of available orderings (summaries only).
+internal sealed class TmdbEpisodeGroupsResponse
+{
+    [JsonPropertyName("results")] public List<TmdbEpisodeGroupSummary>? Results { get; set; }
+}
+
+internal sealed class TmdbEpisodeGroupSummary
+{
+    [JsonPropertyName("id")] public string? Id { get; set; }
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    [JsonPropertyName("episode_count")] public int EpisodeCount { get; set; }
+    [JsonPropertyName("group_count")] public int GroupCount { get; set; }
+    [JsonPropertyName("type")] public int Type { get; set; }
+}
+
+// tv/episode_group/{id} — the full ordering: a list of groups (each a "season"), each holding episodes
+// in order. The episodes carry their original season/episode numbers, which we re-number to the ordering.
+internal sealed class TmdbEpisodeGroupDetails
+{
+    [JsonPropertyName("id")] public string? Id { get; set; }
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    [JsonPropertyName("type")] public int Type { get; set; }
+    [JsonPropertyName("groups")] public List<TmdbEpisodeGroupItem>? Groups { get; set; }
+}
+
+internal sealed class TmdbEpisodeGroupItem
+{
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    [JsonPropertyName("order")] public int Order { get; set; }
+    [JsonPropertyName("episodes")] public List<TmdbEpisodeGroupEpisode>? Episodes { get; set; }
+}
+
+// A group's episode: the standard episode fields plus an `order` giving its position within the group.
+internal sealed class TmdbEpisodeGroupEpisode
+{
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("order")] public int Order { get; set; }
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    [JsonPropertyName("overview")] public string? Overview { get; set; }
+    [JsonPropertyName("air_date")] public string? AirDate { get; set; }
+}
+
 internal sealed class TmdbExternalIds
 {
     [JsonPropertyName("imdb_id")] public string? ImdbId { get; set; }

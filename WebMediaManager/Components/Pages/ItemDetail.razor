@@ -2,6 +2,7 @@
 @using WebMediaManager.Core.Scanning
 @inject IMediaService MediaService
 @inject ISettingsService SettingsService
+@inject IIdentifyService IdentifyService
 
 <PageTitle>@(item?.Title ?? "Item")</PageTitle>
 
@@ -76,6 +77,10 @@ else
                 {
                     <div><dt class="text-slate-500">Status</dt><dd class="text-slate-200">@show.Status</dd></div>
                 }
+                @if (item is TvShow { EpisodeGroupName: { Length: > 0 } orderName })
+                {
+                    <div><dt class="text-slate-500">Episode order</dt><dd class="text-slate-200">@orderName</dd></div>
+                }
                 @if (!string.IsNullOrEmpty(item.TmdbId))
                 {
                     <div><dt class="text-slate-500">TMDB</dt><dd class="text-slate-200">@item.TmdbId</dd></div>
@@ -109,12 +114,27 @@ else
     @if (item is TvShow tv)
     {
         <div class="mt-8 space-y-5">
+            @if (matchError is not null)
+            {
+                <p class="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">@matchError</p>
+            }
             @foreach (var season in tv.Seasons)
             {
                 <div>
-                    <h2 class="text-sm font-semibold text-white">
-                        @(season.SeasonNumber == 0 ? "Specials" : $"Season {season.SeasonNumber}")
-                        <span class="font-normal text-slate-500">· @season.Episodes.Count episode(s)</span>
+                    <h2 class="flex items-center gap-2 text-sm font-semibold text-white">
+                        <span>
+                            @(season.SeasonNumber == 0 ? "Specials" : $"Season {season.SeasonNumber}")
+                            <span class="font-normal text-slate-500">· @season.Episodes.Count episode(s)</span>
+                        </span>
+                        @if (CanMatchEpisodes(tv))
+                        {
+                            <button class="ml-auto rounded border border-slate-700 px-2 py-0.5 text-xs font-normal text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                                    disabled="@(busyId is not null)"
+                                    title="Re-fetch metadata for this season's episodes and write their NFOs"
+                                    @onclick="() => MatchSeason(season.Id)">
+                                @(busyId == season.Id ? "Matching…" : "Match season")
+                            </button>
+                        }
                     </h2>
                     <div class="mt-2 divide-y divide-slate-800 rounded-lg border border-slate-800">
                         @foreach (var ep in season.Episodes)
@@ -129,6 +149,15 @@ else
                                         @if (ep.AirDate is { } air)
                                         {
                                             <span class="text-xs text-slate-500">@air.ToString("yyyy-MM-dd")</span>
+                                        }
+                                        @if (CanMatchEpisodes(tv))
+                                        {
+                                            <button class="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                                                    disabled="@(busyId is not null)"
+                                                    title="Re-fetch metadata for this episode and write its NFO"
+                                                    @onclick="() => MatchEpisode(ep.Id)">
+                                                @(busyId == ep.Id ? "Matching…" : "Match")
+                                            </button>
                                         }
                                         @if (ep.VideoFilePath.Length > 0)
                                         {
@@ -179,6 +208,8 @@ else
     private bool showRename;
     private bool showPlayer;
     private Guid? playingEpisodeId;
+    private Guid? busyId;
+    private string? matchError;
     private MetadataSource preferredTvSource = MetadataSource.Tmdb;
     private MetadataSource preferredMovieSource = MetadataSource.Tmdb;
 
@@ -208,6 +239,38 @@ else
     }
 
     private void ToggleEpisode(Guid id) => playingEpisodeId = playingEpisodeId == id ? null : id;
+
+    // Per-season / per-episode matching is only meaningful once the show itself is matched, since it
+    // re-uses the show's provider link and episode order to look episodes up by number.
+    private static bool CanMatchEpisodes(TvShow show) => show.PrimaryProvider != MetadataSource.None;
+
+    private Task MatchSeason(Guid seasonId) => RunMatch(seasonId, () => IdentifyService.RefreshSeasonAsync(seasonId));
+
+    private Task MatchEpisode(Guid episodeId) => RunMatch(episodeId, () => IdentifyService.RefreshEpisodeAsync(episodeId));
+
+    private async Task RunMatch(Guid id, Func<Task> action)
+    {
+        if (busyId is not null)
+        {
+            return;
+        }
+
+        busyId = id;
+        matchError = null;
+        try
+        {
+            await action();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            matchError = ex.Message;
+        }
+        finally
+        {
+            busyId = null;
+        }
+    }
 
     // Filename + open-in-new-tab fallback, with a note when the container won't play inline.
     private RenderFragment VideoCaption(string videoPath, string url) =>@<p class="mt-2 flex flex-wrap items-center gap-x-2 text-xs text-slate-500">

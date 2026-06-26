@@ -39,8 +39,46 @@ public class MediaNameParserTests
     [Theory]
     [InlineData("just-a-movie.mkv")]
     [InlineData("featurette.mp4")]
+    [InlineData("01 - The Wrong Side of the Tracks.mp4")] // leading number is ambiguous without a season folder
     public void ParseEpisode_returns_null_without_marker(string input)
     {
         Assert.Null(MediaNameParser.ParseEpisode(input));
+    }
+
+    [Theory]
+    [InlineData("Season 1", 1)]
+    [InlineData("Season 01", 1)]
+    [InlineData("Season.03", 3)]
+    [InlineData("S1", 1)]
+    [InlineData("S01", 1)]
+    [InlineData("Series 2", 2)]
+    [InlineData("3", 3)]
+    [InlineData("Specials", 0)]
+    [InlineData("Extras", null)]
+    [InlineData("Happy Tree Friends (1999)", null)]
+    public void ParseSeasonFolder_extracts_season_number(string input, int? expected)
+    {
+        Assert.Equal(expected, MediaNameParser.ParseSeasonFolder(input));
+    }
+
+    [Theory]
+    // A leading number resolves to the season folder's number (the reported Happy Tree Friends case).
+    [InlineData("01 - The Wrong Side of the Tracks.mp4", "Season 03", 3, new[] { 1 })]
+    [InlineData("39 - Autopsy Turvy.mp4", "Season 03", 3, new[] { 39 })]
+    [InlineData("02 From Hero to Eternity.mp4", "S3", 3, new[] { 2 })]
+    [InlineData("01-02 Double Length.mp4", "Season 03", 3, new[] { 1, 2 })] // bare range
+    // Episode-only markers also borrow the folder's season.
+    [InlineData("E02 - Eye Candy.mp4", "Season 02", 2, new[] { 2 })]
+    [InlineData("Episode 5.mkv", "Season 01", 1, new[] { 5 })]
+    [InlineData("Show E02E03.mkv", "Season 04", 4, new[] { 2, 3 })]
+    // An explicit filename marker still wins over the folder.
+    [InlineData("Happy Tree Friends - S05E01 - The Wrong Side.mp4", "Season 03", 5, new[] { 1 })]
+    public void ParseEpisode_uses_season_folder_when_filename_lacks_one(
+        string fileName, string seasonFolder, int season, int[] episodes)
+    {
+        var result = MediaNameParser.ParseEpisode(fileName, seasonFolder);
+        Assert.NotNull(result);
+        Assert.Equal(season, result!.Season);
+        Assert.Equal(episodes, result.Episodes);
     }
 }

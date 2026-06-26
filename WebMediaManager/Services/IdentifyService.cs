@@ -15,8 +15,29 @@ public interface IIdentifyService
     Task<MetadataSearchResult?> LookupByIdAsync(
         MetadataSource source, string providerId, LibraryType type, CancellationToken ct = default);
 
-    /// <summary>Links a chosen search result to an item: fetches details, applies metadata, marks it Matched.</summary>
-    Task LinkAsync(Guid itemId, MetadataSearchResult result, CancellationToken ct = default);
+    /// <summary>Alternate episode orderings (TMDB episode groups) a source offers for a show; empty when none.</summary>
+    Task<IReadOnlyList<EpisodeOrdering>> GetEpisodeOrderingsAsync(
+        MetadataSource source, string providerId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Links a chosen search result to an item: fetches details, applies metadata, marks it Matched.
+    /// For a TV show, <paramref name="ordering"/> selects an alternate episode order (null = aired order).
+    /// </summary>
+    Task LinkAsync(Guid itemId, MetadataSearchResult result, EpisodeOrdering? ordering = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Re-fetches metadata for one season's episodes of an already-matched show (matched by
+    /// season/episode number against the show's existing provider link and episode order) and
+    /// writes only those episodes' NFOs. Leaves episodes with no provider match untouched.
+    /// </summary>
+    Task RefreshSeasonAsync(Guid seasonId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Re-fetches metadata for a single episode of an already-matched show (matched by season/episode
+    /// number) and writes only that episode's NFO. Useful for a freshly added episode of an ongoing
+    /// season, so a new file gets its metadata and sidecar without re-touching the rest of the show.
+    /// </summary>
+    Task RefreshEpisodeAsync(Guid episodeId, CancellationToken ct = default);
 }
 
 public sealed class IdentifyService(
@@ -57,7 +78,15 @@ public sealed class IdentifyService(
             : new MetadataSearchResult(source, show.ProviderId, show.Title, show.Year, show.Plot, show.PosterUrl);
     }
 
-    public async Task LinkAsync(Guid itemId, MetadataSearchResult result, CancellationToken ct = default)
+    public async Task<IReadOnlyList<EpisodeOrdering>> GetEpisodeOrderingsAsync(
+        MetadataSource source, string providerId, CancellationToken ct = default)
+    {
+        var provider = resolver.Get(source)
+            ?? throw new MetadataException($"Provider {source} is not available.");
+        return await provider.GetEpisodeOrderingsAsync(providerId, ct);
+    }
+
+    public async Task LinkAsync(Guid itemId, MetadataSearchResult result, EpisodeOrdering? ordering = null, CancellationToken ct = default)
     {
         // Falls back to a generic subject if we fail before the item is loaded; refined to the title otherwise.
         var subject = "item";
@@ -87,9 +116,11 @@ public sealed class IdentifyService(
                     var showMeta = await provider.GetTvShowAsync(result.ProviderId, ct)
                         ?? throw new MetadataException("No show details returned by the provider.");
                     ApplyShow(show, showMeta);
+                    show.EpisodeGroupId = ordering?.Id;
+                    show.EpisodeGroupName = ordering?.Name;
                     posterUrl = showMeta.PosterUrl;
                     fanartUrl = showMeta.FanartUrl;
-                    await EnrichEpisodesAsync(db, show, provider, result.ProviderId, ct);
+                    await EnrichEpisodesAsync(db, show, provider, result.ProviderId, ordering?.Id, ct);
                     break;
             }
 
@@ -100,8 +131,9 @@ public sealed class IdentifyService(
             await RefreshArtworkRowsAsync(db, itemId, posterUrl, fanartUrl, ct);
             await db.SaveChangesAsync(ct);
 
+            var orderNote = ordering is null ? string.Empty : $" · {ordering.Name} order";
             await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Success, subject,
-                $"Matched to {result.Source} #{result.ProviderId}", itemId, ct);
+                $"Matched to {result.Source} #{result.ProviderId}{orderNote}", itemId, ct);
         }
         catch (Exception ex)
         {
@@ -162,37 +194,186 @@ public sealed class IdentifyService(
         }
     }
 
-    private async Task EnrichEpisodesAsync(MediaDbContext db, TvShow show, IMetadataProvider provider, string providerId, CancellationToken ct)
+    public async Task RefreshSeasonAsync(Guid seasonId, CancellationToken ct = default)
+    {
+        var subject = "season";
+        try
+        {
+            await using var db = await factory.CreateDbContextAsync(ct);
+            var season = await db.Seasons.Include(s => s.Episodes).FirstOrDefaultAsync(s => s.Id == seasonId, ct)
+                ?? throw new InvalidOperationException("Season not found.");
+            var show = await db.TvShows.FirstAsync(s => s.Id == season.TvShowId, ct);
+            subject = $"{show.Title} · Season {season.SeasonNumber}";
+
+            var (provider, providerId) = ResolveShowProvider(show);
+            var byNumber = await FetchEpisodeMetadataAsync(provider, providerId, show.EpisodeGroupId, [season.SeasonNumber], ct);
+
+            var matched = 0;
+            foreach (var ep in season.Episodes)
+            {
+                if (byNumber.TryGetValue((ep.SeasonNumber, ep.EpisodeNumber), out var meta))
+                {
+                    ApplyEpisode(ep, meta);
+                    matched++;
+                }
+            }
+            await db.SaveChangesAsync(ct);
+
+            await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Success, subject,
+                $"Matched {matched}/{season.Episodes.Count} episode(s) by number", show.Id, ct);
+        }
+        catch (Exception ex)
+        {
+            await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Failure, subject,
+                $"Season match failed: {ex.Message}", null, ct);
+            throw;
+        }
+
+        await WriteEpisodeNfoAsync(() => nfo.WriteForSeasonAsync(seasonId, ct), subject);
+    }
+
+    public async Task RefreshEpisodeAsync(Guid episodeId, CancellationToken ct = default)
+    {
+        var subject = "episode";
+        Guid showId;
+        try
+        {
+            await using var db = await factory.CreateDbContextAsync(ct);
+            var episode = await db.Episodes.FirstOrDefaultAsync(e => e.Id == episodeId, ct)
+                ?? throw new InvalidOperationException("Episode not found.");
+            var season = await db.Seasons.FirstAsync(s => s.Id == episode.SeasonId, ct);
+            var show = await db.TvShows.FirstAsync(s => s.Id == season.TvShowId, ct);
+            showId = show.Id;
+            subject = $"{show.Title} · S{episode.SeasonNumber:00}E{episode.EpisodeNumber:00}";
+
+            var (provider, providerId) = ResolveShowProvider(show);
+            var byNumber = await FetchEpisodeMetadataAsync(provider, providerId, show.EpisodeGroupId, [episode.SeasonNumber], ct);
+
+            if (byNumber.TryGetValue((episode.SeasonNumber, episode.EpisodeNumber), out var meta))
+            {
+                ApplyEpisode(episode, meta);
+                await db.SaveChangesAsync(ct);
+                await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Success, subject,
+                    "Matched by number", showId, ct);
+            }
+            else
+            {
+                await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Success, subject,
+                    "No provider match for this number — wrote NFO from existing data", showId, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            await activityLog.LogAsync(ActivityCategory.Identify, ActivityStatus.Failure, subject,
+                $"Episode match failed: {ex.Message}", null, ct);
+            throw;
+        }
+
+        await WriteEpisodeNfoAsync(() => nfo.WriteForEpisodeAsync(episodeId, ct), subject);
+    }
+
+    private async Task EnrichEpisodesAsync(
+        MediaDbContext db, TvShow show, IMetadataProvider provider, string providerId, string? episodeGroupId, CancellationToken ct)
     {
         try
         {
             await db.Entry(show).Collection(s => s.Seasons).Query().Include(se => se.Episodes).LoadAsync(ct);
 
-            foreach (var seasonNumber in show.Seasons.Select(s => s.SeasonNumber).Distinct())
+            var byNumber = await FetchEpisodeMetadataAsync(
+                provider, providerId, episodeGroupId, show.Seasons.Select(s => s.SeasonNumber), ct);
+            if (byNumber.Count == 0)
             {
-                var episodes = await provider.GetEpisodesAsync(providerId, seasonNumber, ct);
-                if (episodes.Count == 0)
-                {
-                    continue;
-                }
+                return;
+            }
 
-                var byNumber = episodes.ToDictionary(e => (e.Season, e.Episode));
-                var scanned = show.Seasons.Where(s => s.SeasonNumber == seasonNumber).SelectMany(s => s.Episodes);
-                foreach (var ep in scanned)
+            foreach (var ep in show.Seasons.SelectMany(s => s.Episodes))
+            {
+                if (byNumber.TryGetValue((ep.SeasonNumber, ep.EpisodeNumber), out var meta))
                 {
-                    if (byNumber.TryGetValue((ep.SeasonNumber, ep.EpisodeNumber), out var meta))
-                    {
-                        ep.Title = meta.Title ?? ep.Title;
-                        ep.Plot = meta.Plot ?? ep.Plot;
-                        ep.AirDate = meta.AirDate ?? ep.AirDate;
-                        ep.TmdbId ??= meta.TmdbId;
-                    }
+                    ApplyEpisode(ep, meta);
                 }
             }
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Episode metadata enrichment failed for show {ShowId}", show.Id);
+        }
+    }
+
+    /// <summary>
+    /// Pulls a show's episode metadata keyed by (season, episode). A chosen ordering returns every
+    /// season's episodes in one call, re-numbered to that order; otherwise each requested season is
+    /// pulled in the provider's default (aired) order.
+    /// </summary>
+    private async Task<Dictionary<(int Season, int Episode), EpisodeMetadata>> FetchEpisodeMetadataAsync(
+        IMetadataProvider provider, string providerId, string? episodeGroupId, IEnumerable<int> seasonNumbers, CancellationToken ct)
+    {
+        IReadOnlyList<EpisodeMetadata> episodes;
+        if (!string.IsNullOrEmpty(episodeGroupId))
+        {
+            episodes = await provider.GetOrderedEpisodesAsync(episodeGroupId, ct);
+        }
+        else
+        {
+            var collected = new List<EpisodeMetadata>();
+            foreach (var seasonNumber in seasonNumbers.Distinct())
+            {
+                collected.AddRange(await provider.GetEpisodesAsync(providerId, seasonNumber, ct));
+            }
+            episodes = collected;
+        }
+
+        // First entry wins on the off chance an ordering repeats a (season, episode) slot.
+        return episodes
+            .GroupBy(e => (e.Season, e.Episode))
+            .ToDictionary(g => g.Key, g => g.First());
+    }
+
+    private static void ApplyEpisode(Episode ep, EpisodeMetadata meta)
+    {
+        ep.Title = meta.Title ?? ep.Title;
+        ep.Plot = meta.Plot ?? ep.Plot;
+        ep.AirDate = meta.AirDate ?? ep.AirDate;
+        ep.TmdbId ??= meta.TmdbId;
+    }
+
+    /// <summary>Resolves the provider and the show's id for it; throws if the show isn't matched yet.</summary>
+    private (IMetadataProvider Provider, string ProviderId) ResolveShowProvider(TvShow show)
+    {
+        var providerId = show.PrimaryProvider switch
+        {
+            MetadataSource.Tmdb => show.TmdbId,
+            MetadataSource.Tvdb => show.TvdbId,
+            MetadataSource.Imdb => show.ImdbId,
+            _ => null,
+        };
+        if (string.IsNullOrEmpty(providerId))
+        {
+            throw new MetadataException("Identify the show before matching individual seasons or episodes.");
+        }
+
+        var provider = resolver.Get(show.PrimaryProvider)
+            ?? throw new MetadataException($"Provider {show.PrimaryProvider} is not available.");
+        return (provider, providerId);
+    }
+
+    /// <summary>Best-effort episode-NFO write that records its own activity-log outcome; never throws.</summary>
+    private async Task WriteEpisodeNfoAsync(Func<Task<int>> write, string subject)
+    {
+        try
+        {
+            var files = await write();
+            if (files > 0)
+            {
+                await activityLog.LogAsync(ActivityCategory.Nfo, ActivityStatus.Success, subject,
+                    $"Wrote {files} NFO file(s)");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "NFO write failed for {Subject}", subject);
+            await activityLog.LogAsync(ActivityCategory.Nfo, ActivityStatus.Failure, subject,
+                $"NFO write failed: {ex.Message}");
         }
     }
 

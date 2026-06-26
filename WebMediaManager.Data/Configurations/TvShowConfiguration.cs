@@ -10,6 +10,9 @@ public sealed class TvShowConfiguration : IEntityTypeConfiguration<TvShow>
     {
         builder.Property(s => s.Status).HasConversion<string>().HasMaxLength(32);
 
+        builder.Property(s => s.EpisodeGroupId).HasMaxLength(64);
+        builder.Property(s => s.EpisodeGroupName).HasMaxLength(200);
+
         builder.HasMany(s => s.Seasons)
             .WithOne()
             .HasForeignKey(s => s.TvShowId)
