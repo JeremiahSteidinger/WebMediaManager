@@ -98,6 +98,13 @@ public sealed class ImdbMetadataProvider(HttpClient http, ISettingsService setti
             .ToList() ?? [];
     }
 
+    // Alternate episode orderings are a TMDB concept; OMDb/IMDb don't expose them.
+    public Task<IReadOnlyList<EpisodeOrdering>> GetEpisodeOrderingsAsync(string showProviderId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<EpisodeOrdering>>([]);
+
+    public Task<IReadOnlyList<EpisodeMetadata>> GetOrderedEpisodesAsync(string orderingId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<EpisodeMetadata>>([]);
+
     private async Task<OmdbTitle?> GetTitleAsync(string providerId, CancellationToken ct)
     {
         var d = await GetAsync<OmdbTitle>($"?i={Uri.EscapeDataString(providerId)}&plot=full", ct);

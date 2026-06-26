@@ -40,6 +40,13 @@ public sealed class TvdbMetadataProvider(HttpClient http, TvdbTokenProvider toke
     public Task<IReadOnlyList<EpisodeMetadata>> GetEpisodesAsync(string showProviderId, int seasonNumber, CancellationToken ct) =>
         Task.FromResult<IReadOnlyList<EpisodeMetadata>>([]);
 
+    // Alternate episode orderings are a TMDB concept; not offered by TVDB here.
+    public Task<IReadOnlyList<EpisodeOrdering>> GetEpisodeOrderingsAsync(string showProviderId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<EpisodeOrdering>>([]);
+
+    public Task<IReadOnlyList<EpisodeMetadata>> GetOrderedEpisodesAsync(string orderingId, CancellationToken ct) =>
+        Task.FromResult<IReadOnlyList<EpisodeMetadata>>([]);
+
     public async Task<TvShowMetadata?> GetTvShowAsync(string providerId, CancellationToken ct)
     {
         var resp = await SendAsync<TvdbSeriesResponse>($"series/{providerId}/extended", ct);

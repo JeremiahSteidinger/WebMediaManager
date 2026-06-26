@@ -81,6 +81,167 @@ public sealed class MediaScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task Tv_seasons_derive_from_folder_when_filenames_lack_a_marker()
+    {
+        // Reproduces the reported Happy Tree Friends case: Season 03's files are named "NN - Title.mp4"
+        // with no SxxExx marker, so the season must come from the folder or it's silently dropped.
+        var show = Path.Combine(_root, "Happy Tree Friends (1999)");
+        var marked = Path.Combine(show, "Season 02");
+        var bare = Path.Combine(show, "Season 03");
+        Directory.CreateDirectory(marked);
+        Directory.CreateDirectory(bare);
+        File.WriteAllText(Path.Combine(marked, "Happy Tree Friends - S02E01 - Eye Candy.mp4"), "");
+        File.WriteAllText(Path.Combine(bare, "01 - The Wrong Side of the Tracks.mp4"), "");
+        File.WriteAllText(Path.Combine(bare, "02 - From Hero to Eternity.mp4"), "");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.TvShows);
+        await new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance)
+            .ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using var db = _factory.CreateDbContext();
+        var tvShow = await db.TvShows.SingleAsync();
+
+        var seasons = await db.Seasons.Where(s => s.TvShowId == tvShow.Id).Select(s => s.SeasonNumber).ToListAsync();
+        Assert.Equal([2, 3], seasons.OrderBy(n => n));
+
+        var s3 = await db.Episodes
+            .Join(db.Seasons, e => e.SeasonId, s => s.Id, (e, s) => new { e, s.TvShowId, s.SeasonNumber })
+            .Where(x => x.TvShowId == tvShow.Id && x.SeasonNumber == 3)
+            .Select(x => x.e.EpisodeNumber)
+            .ToListAsync();
+        Assert.Equal([1, 2], s3.OrderBy(n => n));
+    }
+
+    [Fact]
+    public async Task Reimport_adds_a_newly_parseable_season_to_an_existing_show_without_duplicating()
+    {
+        // The show is already in the DB with Season 02 only. After Season 03's files are renamed into a
+        // parseable form on disk, a reimport should pull that season in — not require removing the show.
+        var show = Path.Combine(_root, "Happy Tree Friends (1999)");
+        var s2 = Path.Combine(show, "Season 02");
+        Directory.CreateDirectory(s2);
+        File.WriteAllText(Path.Combine(s2, "Happy Tree Friends - S02E01 - Eye Candy.mp4"), "");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.TvShows);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(1, await db.Seasons.CountAsync());
+        }
+
+        // Season 03 appears with bare-numbered files (no SxxExx marker).
+        var s3 = Path.Combine(show, "Season 03");
+        Directory.CreateDirectory(s3);
+        File.WriteAllText(Path.Combine(s3, "01 - The Wrong Side of the Tracks.mp4"), "");
+        File.WriteAllText(Path.Combine(s3, "02 - From Hero to Eternity.mp4"), "");
+
+        await scanner.ScanAsync(libraryId, reimport: true, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            var tvShow = await db.TvShows.SingleAsync();
+            var seasons = await db.Seasons.Where(s => s.TvShowId == tvShow.Id)
+                .Select(s => s.SeasonNumber).ToListAsync();
+            Assert.Equal([2, 3], seasons.OrderBy(n => n));            // season 3 pulled in, season 2 not duplicated
+            Assert.Equal(3, await db.Episodes.CountAsync());          // S02E01 + S03E01 + S03E02
+
+            // A second reimport with no on-disk changes must not duplicate the episodes it just added.
+            await scanner.ScanAsync(libraryId, reimport: true, CancellationToken.None);
+        }
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(3, await db.Episodes.CountAsync());
+            Assert.Equal(2, await db.Seasons.CountAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Plain_rescan_picks_up_a_newly_downloaded_episode_of_an_existing_show()
+    {
+        // The reported case: a season is partly downloaded, then a new episode lands. A plain scan (no
+        // reimport) must pull the new episode into the existing show without duplicating what's there.
+        var seasonDir = Path.Combine(_root, "Firefly", "Season 01");
+        Directory.CreateDirectory(seasonDir);
+        File.WriteAllText(Path.Combine(seasonDir, "Firefly S01E01.mkv"), "");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.TvShows);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(1, await db.Episodes.CountAsync());
+        }
+
+        // A new episode is downloaded into the same season.
+        File.WriteAllText(Path.Combine(seasonDir, "Firefly S01E02.mkv"), "");
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(1, await db.TvShows.CountAsync());   // not duplicated
+            Assert.Equal(1, await db.Seasons.CountAsync());
+            var episodes = await db.Episodes.Select(e => e.EpisodeNumber).OrderBy(n => n).ToListAsync();
+            Assert.Equal([1, 2], episodes);                   // the new episode was picked up
+
+            // A third scan with no on-disk change must not duplicate.
+            await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+        }
+
+        await using (var db = _factory.CreateDbContext())
+        {
+            Assert.Equal(2, await db.Episodes.CountAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Plain_rescan_picks_up_a_whole_new_season_of_an_existing_show()
+    {
+        var s1 = Path.Combine(_root, "Firefly", "Season 01");
+        Directory.CreateDirectory(s1);
+        File.WriteAllText(Path.Combine(s1, "Firefly S01E01.mkv"), "");
+
+        var libraryId = await SeedLibraryAsync(LibraryType.TvShows);
+        var scanner = new MediaScanner(_factory, new NoopProgress(), new NfoReader(), NullLogger<MediaScanner>.Instance);
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        var s2 = Path.Combine(_root, "Firefly", "Season 02");
+        Directory.CreateDirectory(s2);
+        File.WriteAllText(Path.Combine(s2, "Firefly S02E01.mkv"), "");
+        await scanner.ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        await using var db = _factory.CreateDbContext();
+        var tvShow = await db.TvShows.SingleAsync();
+        var seasons = await db.Seasons.Where(s => s.TvShowId == tvShow.Id).Select(s => s.SeasonNumber).ToListAsync();
+        Assert.Equal([1, 2], seasons.OrderBy(n => n));
+    }
+
+    [Fact]
+    public async Task Scan_reports_incremental_progress_for_a_show_with_many_episodes()
+    {
+        // A show with far more episodes than the report interval must publish steady running updates while
+        // it works, rather than going silent until the whole show is done (the "looks frozen" complaint).
+        var seasonDir = Path.Combine(_root, "Big Show", "Season 01");
+        Directory.CreateDirectory(seasonDir);
+        for (var i = 1; i <= 60; i++)
+        {
+            File.WriteAllText(Path.Combine(seasonDir, $"Big Show - S01E{i:D2}.mkv"), "");
+        }
+
+        var capture = new CapturingProgress();
+        var libraryId = await SeedLibraryAsync(LibraryType.TvShows);
+        await new MediaScanner(_factory, capture, new NfoReader(), NullLogger<MediaScanner>.Instance)
+            .ScanAsync(libraryId, reimport: false, CancellationToken.None);
+
+        var running = capture.Snapshots.Where(p => p.State == ScanState.Running && p.Current is not null).ToList();
+        Assert.True(running.Count >= 3, $"expected several running updates, got {running.Count}");
+        Assert.Contains(running, p => p.Current!.Contains("imported"));   // mid-show, not just the final report
+    }
+
+    [Fact]
     public async Task Rescan_does_not_duplicate_items()
     {
         var dir = Path.Combine(_root, "The Matrix (1999)");
@@ -312,6 +473,19 @@ public sealed class MediaScannerTests : IDisposable
         : IDbContextFactory<MediaDbContext>
     {
         public MediaDbContext CreateDbContext() => new(options);
+    }
+
+    private sealed class CapturingProgress : IScanProgressService
+    {
+        public List<ScanProgress> Snapshots { get; } = [];
+        public event Action<ScanProgress>? Changed;
+        public ScanProgress Get(Guid libraryId) =>
+            Snapshots.LastOrDefault(p => p.LibraryId == libraryId) ?? ScanProgress.Idle(libraryId);
+        public void Set(ScanProgress progress) { Snapshots.Add(progress); Changed?.Invoke(progress); }
+        public bool IsRunning(Guid libraryId) => false;
+        public CancellationToken Register(Guid libraryId) => CancellationToken.None;
+        public void RequestCancel(Guid libraryId) { }
+        public void Release(Guid libraryId) { }
     }
 
     private sealed class NoopProgress : IScanProgressService

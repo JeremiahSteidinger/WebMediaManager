@@ -3,6 +3,11 @@
 
 <Modal Visible="Visible" Title="@($"Identify · {ItemTitle}")" OnClose="OnClose">
     <div class="space-y-4">
+        @if (error is not null)
+        {
+            <p class="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">@error</p>
+        }
+
         <div class="flex gap-2">
             <select class="rounded border border-slate-700 bg-slate-800 px-2 py-2 text-sm text-white" @bind="source">
                 @foreach (var s in availableSources)
@@ -23,11 +28,6 @@
             </button>
         </div>
 
-        @if (error is not null)
-        {
-            <p class="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">@error</p>
-        }
-
         @if (busy)
         {
             <p class="text-sm text-slate-400">Working…</p>
@@ -39,6 +39,13 @@
 
         @if (results is { Count: > 0 })
         {
+            @if (LibraryType == LibraryType.TvShows)
+            {
+                <p class="text-xs text-slate-500">
+                    Pick the episode order your files follow — episode 1 of that order maps to S01E01.
+                </p>
+            }
+
             <div class="max-h-96 space-y-2 overflow-y-auto pr-1">
                 @foreach (var r in results)
                 {
@@ -57,11 +64,30 @@
                             <div class="font-medium text-white">
                                 @r.Title <span class="text-slate-400">@(r.Year?.ToString())</span>
                             </div>
-                            <p class="mt-1 line-clamp-3 text-xs text-slate-400">@r.Overview</p>
+                            <p class="mt-1 line-clamp-2 text-xs text-slate-400">@r.Overview</p>
+                            @if (LibraryType == LibraryType.TvShows)
+                            {
+                                <div class="mt-2 flex items-center gap-2">
+                                    <span class="shrink-0 text-xs text-slate-500">Order</span>
+                                    <select class="min-w-0 flex-1 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-white"
+                                            value="@SelectedOrderingId(r.ProviderId)"
+                                            @onchange="e => SetOrdering(r.ProviderId, e.Value?.ToString())">
+                                        <option value="">Aired order (default)</option>
+                                        @foreach (var o in OrderingsFor(r.ProviderId))
+                                        {
+                                            <option value="@o.Id">@OrderingLabel(o)</option>
+                                        }
+                                    </select>
+                                    @if (orderingsLoading.Contains(r.ProviderId))
+                                    {
+                                        <span class="shrink-0 text-xs text-slate-600">checking…</span>
+                                    }
+                                </div>
+                            }
                         </div>
                         <button class="self-start rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-                                @onclick="() => Link(r)" disabled="@busy">
-                            Select
+                                @onclick="() => Match(r)" disabled="@busy">
+                            Match
                         </button>
                     </div>
                 }
@@ -90,6 +116,12 @@
     private string? error;
     private Guid loadedFor;
 
+    // Episode orderings (TMDB episode groups) per show result, loaded right after a search so the inline
+    // picker is populated without an extra step. Keyed by provider id; the selected id ("" = aired order).
+    private readonly Dictionary<string, IReadOnlyList<EpisodeOrdering>> orderingsByShow = [];
+    private readonly Dictionary<string, string> selectedOrderingByShow = [];
+    private readonly HashSet<string> orderingsLoading = [];
+
     protected override async Task OnParametersSetAsync()
     {
         if (Visible && ItemId != loadedFor)
@@ -103,6 +135,7 @@
             query = ItemTitle;
             results = null;
             error = null;
+            ResetOrderings();
             await Search();
         }
         else if (!Visible)
@@ -128,6 +161,7 @@
 
         busy = true;
         error = null;
+        ResetOrderings();
         try
         {
             if (byId)
@@ -149,15 +183,56 @@
         {
             busy = false;
         }
+
+        // For shows, fetch each result's alternate orderings in the background so the inline picker fills in.
+        if (LibraryType == LibraryType.TvShows && results is { Count: > 0 })
+        {
+            foreach (var r in results)
+            {
+                _ = LoadOrderingsAsync(r.ProviderId);
+            }
+        }
     }
 
-    private async Task Link(MetadataSearchResult result)
+    private async Task LoadOrderingsAsync(string providerId)
+    {
+        if (orderingsByShow.ContainsKey(providerId) || !orderingsLoading.Add(providerId))
+        {
+            return;
+        }
+        try
+        {
+            orderingsByShow[providerId] = await IdentifyService.GetEpisodeOrderingsAsync(source, providerId);
+        }
+        catch
+        {
+            // Orderings are an enhancement; on failure just offer aired order for this show.
+            orderingsByShow[providerId] = [];
+        }
+        finally
+        {
+            orderingsLoading.Remove(providerId);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    // Match a result using whatever order is selected for it (aired order when nothing is picked).
+    private Task Match(MetadataSearchResult result)
+    {
+        var id = SelectedOrderingId(result.ProviderId);
+        var ordering = string.IsNullOrEmpty(id)
+            ? null
+            : OrderingsFor(result.ProviderId).FirstOrDefault(o => o.Id == id);
+        return Link(result, ordering);
+    }
+
+    private async Task Link(MetadataSearchResult result, EpisodeOrdering? ordering)
     {
         busy = true;
         error = null;
         try
         {
-            await IdentifyService.LinkAsync(ItemId, result);
+            await IdentifyService.LinkAsync(ItemId, result, ordering);
             await OnLinked.InvokeAsync();
         }
         catch (Exception ex)
@@ -169,6 +244,26 @@
             busy = false;
         }
     }
+
+    private void ResetOrderings()
+    {
+        orderingsByShow.Clear();
+        selectedOrderingByShow.Clear();
+        orderingsLoading.Clear();
+    }
+
+    private IReadOnlyList<EpisodeOrdering> OrderingsFor(string providerId) =>
+        orderingsByShow.TryGetValue(providerId, out var o) ? o : [];
+
+    // "" selects "Aired order (default)".
+    private string SelectedOrderingId(string providerId) =>
+        selectedOrderingByShow.TryGetValue(providerId, out var id) ? id : string.Empty;
+
+    private void SetOrdering(string providerId, string? id) =>
+        selectedOrderingByShow[providerId] = id ?? string.Empty;
+
+    private static string OrderingLabel(EpisodeOrdering o) =>
+        o.EpisodeCount > 0 ? $"{o.Name} · {o.EpisodeCount} episodes" : o.Name;
 
     private static string Label(MetadataSource s) => s switch
     {

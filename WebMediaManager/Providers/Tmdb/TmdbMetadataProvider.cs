@@ -108,6 +108,43 @@ public sealed class TmdbMetadataProvider(HttpClient http, ISettingsService setti
             .ToList() ?? [];
     }
 
+    public async Task<IReadOnlyList<EpisodeOrdering>> GetEpisodeOrderingsAsync(string showProviderId, CancellationToken ct)
+    {
+        var resp = await GetAsync<TmdbEpisodeGroupsResponse>($"tv/{showProviderId}/episode_groups", ct);
+        return resp?.Results?
+            .Where(g => !string.IsNullOrEmpty(g.Id))
+            .Select(g => new EpisodeOrdering(g.Id!, OrderingName(g.Name, g.Type), g.Description, g.EpisodeCount))
+            .ToList() ?? [];
+    }
+
+    public async Task<IReadOnlyList<EpisodeMetadata>> GetOrderedEpisodesAsync(string orderingId, CancellationToken ct)
+    {
+        var detail = await GetAsync<TmdbEpisodeGroupDetails>($"tv/episode_group/{orderingId}", ct);
+        if (detail?.Groups is null)
+        {
+            return [];
+        }
+
+        // Re-number to the ordering: each group becomes a season, episodes are numbered by their position.
+        // We assign sequential 1-based season/episode numbers (groups/episodes sorted by TMDB's `order`)
+        // rather than trusting the raw `order` values, which are 0-based — this way the result lines up with
+        // files laid out in this order as S01E01, S01E02, … regardless of TMDB's indexing base.
+        var episodes = new List<EpisodeMetadata>();
+        var seasonNumber = 1;
+        foreach (var group in detail.Groups.OrderBy(g => g.Order))
+        {
+            var episodeNumber = 1;
+            foreach (var ep in (group.Episodes ?? []).OrderBy(e => e.Order))
+            {
+                episodes.Add(new EpisodeMetadata(
+                    seasonNumber, episodeNumber, ep.Name, ep.Overview, DateOnlyOf(ep.AirDate), ep.Id.ToString(), null));
+                episodeNumber++;
+            }
+            seasonNumber++;
+        }
+        return episodes;
+    }
+
     private async Task<T?> GetAsync<T>(string url, CancellationToken ct)
     {
         var key = (await settings.GetAsync(ct)).Providers.TmdbApiKey;
@@ -143,6 +180,23 @@ public sealed class TmdbMetadataProvider(HttpClient http, ISettingsService setti
 
     private static DateOnly? DateOnlyOf(string? date) =>
         DateOnly.TryParse(date, CultureInfo.InvariantCulture, out var d) ? d : null;
+
+    // TMDB names most groups descriptively ("DVD Order", "Fox Order"); fall back to the type when blank.
+    private static string OrderingName(string? name, int type) =>
+        string.IsNullOrWhiteSpace(name) ? OrderingTypeLabel(type) : name.Trim();
+
+    // TMDB episode-group type enum (https://developer.themoviedb.org/reference/tv-episode-group-details).
+    private static string OrderingTypeLabel(int type) => type switch
+    {
+        1 => "Original air date",
+        2 => "Absolute",
+        3 => "DVD",
+        4 => "Digital",
+        5 => "Story arc",
+        6 => "Production",
+        7 => "TV",
+        _ => "Alternate order",
+    };
 
     private static TvShowStatus MapStatus(string? status) => status switch
     {
